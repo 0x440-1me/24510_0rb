@@ -58,7 +58,7 @@ This repo is a study in Discord client internals and quest flow mechanics. It's 
 
 ## author
 
-- `0x220_1me`
+- `0x440_1me`
 
 ---
 
