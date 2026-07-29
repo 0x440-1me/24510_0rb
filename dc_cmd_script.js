@@ -1,6 +1,6 @@
 (async () => {
 
-	// hax by 0x220-1me ;d
+	// hax by 0x440-1me ;d
 
 	delete window.$;
 
