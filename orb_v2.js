@@ -1,12 +1,32 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.0.0-research";
+  const VERSION = "2.1.0-research";
   const TAG = "[0rb:v2]";
+  const CACHE_TTL_MS = 5_000;
+  const MAX_429_RETRIES = 8;
+  const MIN_RETRY_MS = 250;
+  const MAX_RETRY_MS = 60_000;
+  const KNOWN_TASK_NAMES = new Set([
+    "WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE", "PLAY_ON_DESKTOP",
+    "STREAM_ON_DESKTOP", "PLAY_ACTIVITY"
+  ]);
 
   const log = (...args) => console.log(TAG, ...args);
   const warn = (...args) => console.warn(TAG, ...args);
-  const errorLog = (...args) => console.error(TAG, ...args);
+  const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
+
+  function asDisplayText(value, fallback = null) {
+    return typeof value === "string" || typeof value === "number" ? String(value) : fallback;
+  }
+
+  function asFiniteNumber(value, label, diagnostics, fallback = null) {
+    if (value == null || value === "") return fallback;
+    const number = typeof value === "number" ? value : Number(value);
+    if (Number.isFinite(number)) return number;
+    diagnostics.push(`${label} is not a finite number.`);
+    return fallback;
+  }
 
   class OrbAbortError extends Error {
     constructor(message = "Orb v2 run aborted") {
@@ -15,150 +35,164 @@
     }
   }
 
+  // Lifecycle ownership is intentionally independent of Discord internals.
   class RunnerContext {
     constructor(label = "run") {
       this.label = label;
       this.controller = new AbortController();
       this.cleanups = [];
-      this.cleaned = false;
+      this.cleanupPromise = null;
+      this.cleanupFailures = [];
       this.startedAt = Date.now();
     }
 
-    get signal() {
-      return this.controller.signal;
-    }
+    get signal() { return this.controller.signal; }
+    get cleaned() { return this.cleanupPromise !== null; }
 
     throwIfAborted() {
-      if (this.signal.aborted) {
-        throw new OrbAbortError(String(this.signal.reason ?? "aborted"));
-      }
+      if (this.signal.aborted) throw new OrbAbortError(String(this.signal.reason ?? "aborted"));
     }
 
     abort(reason = "manual stop") {
-      if (!this.signal.aborted) {
-        this.controller.abort(reason);
-      }
+      if (!this.signal.aborted) this.controller.abort(reason);
     }
 
     own(cleanup) {
-      if (typeof cleanup !== "function") {
-        throw new TypeError("cleanup must be a function");
-      }
-
+      if (typeof cleanup !== "function") throw new TypeError("cleanup must be a function");
       if (this.cleaned) {
-        try {
-          cleanup();
-        } catch (error) {
-          errorLog("Late cleanup failed:", error);
-        }
-        return cleanup;
+        throw new Error("Cannot register cleanup after RunnerContext cleanup has started.");
       }
-
       this.cleanups.push(cleanup);
       return cleanup;
     }
 
     async sleep(milliseconds) {
+      if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+        throw new RangeError("sleep duration must be a non-negative finite number");
+      }
       this.throwIfAborted();
 
       await new Promise((resolve, reject) => {
         let timer = null;
-
-        const onAbort = () => {
+        let settled = false;
+        const settle = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          this.signal.removeEventListener("abort", onAbort);
           if (timer !== null) clearTimeout(timer);
-          this.signal.removeEventListener("abort", onAbort);
-          reject(new OrbAbortError(String(this.signal.reason ?? "aborted")));
+          callback(value);
         };
-
-        timer = setTimeout(() => {
-          this.signal.removeEventListener("abort", onAbort);
-          resolve();
-        }, milliseconds);
+        const onAbort = () => settle(reject, new OrbAbortError(String(this.signal.reason ?? "aborted")));
 
         this.signal.addEventListener("abort", onAbort, { once: true });
+        if (this.signal.aborted) return onAbort();
+        timer = setTimeout(() => settle(resolve), milliseconds);
+        if (settled) clearTimeout(timer);
       });
     }
 
-    async cleanup() {
-      if (this.cleaned) return;
-      this.cleaned = true;
-
-      const failures = [];
-
-      for (let index = this.cleanups.length - 1; index >= 0; index -= 1) {
-        try {
-          await this.cleanups[index]();
-        } catch (error) {
-          failures.push(error);
+    cleanup() {
+      if (this.cleanupPromise) return this.cleanupPromise;
+      this.cleanupPromise = (async () => {
+        const failures = [];
+        while (this.cleanups.length) {
+          const cleanup = this.cleanups.pop();
+          try {
+            await cleanup();
+          } catch (error) {
+            failures.push(error);
+          }
         }
-      }
-
-      this.cleanups.length = 0;
-
-      if (failures.length) {
-        warn(`Cleanup completed with ${failures.length} failure(s).`, failures);
-      }
+        this.cleanupFailures = failures;
+        if (failures.length) warn(`Cleanup completed with ${failures.length} failure(s).`, failures);
+        return failures;
+      })();
+      return this.cleanupPromise;
     }
   }
 
+  // Discord boundary: webpack discovery and HTTP reads are contained here.
   function getWebpackRequire() {
     const chunk = window.webpackChunkdiscord_app;
-
     if (!Array.isArray(chunk)) {
-      throw new Error("Discord webpack chunk array was not found.");
+      throw new Error("Discord webpack chunk array was not found. This Discord build is unsupported.");
     }
 
+    const originalLength = chunk.length;
     let capturedRequire = null;
     const token = `orb-v2-${Math.random().toString(36).slice(2)}`;
-
-    chunk.push([
-      [token],
-      {},
-      require => {
-        capturedRequire = require;
-      }
-    ]);
-
-    chunk.pop();
-
-    if (!capturedRequire?.c) {
-      throw new Error("Could not capture Discord webpack require cache.");
+    try {
+      chunk.push([[token], {}, require => { capturedRequire = require; }]);
+    } catch (error) {
+      throw new Error("Discord webpack require capture failed.", { cause: error });
+    } finally {
+      if (chunk.length > originalLength) chunk.pop();
     }
 
+    if (!isRecord(capturedRequire?.c)) {
+      throw new Error("Discord webpack require cache was unavailable after capture.");
+    }
     return capturedRequire;
   }
 
   function candidateExports(moduleExports) {
-    if (!moduleExports) return [];
-
+    if (moduleExports == null || (typeof moduleExports !== "object" && typeof moduleExports !== "function")) {
+      return [];
+    }
     const candidates = [moduleExports];
-
     for (const key of ["default", "A", "Ay", "Z", "ZP", "Bo", "h"]) {
-      const candidate = moduleExports?.[key];
-      if (candidate && !candidates.includes(candidate)) {
-        candidates.push(candidate);
+      try {
+        const candidate = moduleExports[key];
+        if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+      } catch {
+        // Lazy/proxy values occur in webpack exports; skip only this candidate.
       }
     }
-
     return candidates;
   }
 
-  function findExport(name, predicate) {
+  function findDiscordCapability(name, predicate) {
     const wpRequire = getWebpackRequire();
-
+    let scanned = 0;
     for (const module of Object.values(wpRequire.c)) {
       for (const candidate of candidateExports(module?.exports)) {
+        scanned += 1;
         try {
-          if (predicate(candidate)) {
-            return candidate;
-          }
+          if (predicate(candidate)) return candidate;
         } catch {
-          // Ignore weird lazy/proxy exports and continue scanning.
+          // A capability check must tolerate unusual lazy exports.
         }
       }
     }
+    throw new Error(
+      `Discord ${name} was not found after scanning ${scanned} export candidate(s). ` +
+      "The Discord client bundle may have changed."
+    );
+  }
 
-    throw new Error(`Could not find ${name}`);
+  function readRateLimitDelay(source) {
+    const retryAfter = source?.body?.retry_after ?? source?.response?.body?.retry_after;
+    const seconds = Number(retryAfter ?? 5);
+    const milliseconds = Number.isFinite(seconds) ? Math.ceil(seconds * 1_000) + 500 : 5_500;
+    return Math.min(MAX_RETRY_MS, Math.max(MIN_RETRY_MS, milliseconds));
+  }
+
+  function responseStatus(source) {
+    return source?.status ?? source?.response?.status;
+  }
+
+  function parseQuestResponse(response) {
+    if (!isRecord(response) || !Number.isInteger(response.status)) {
+      throw new Error("Quest read returned an invalid response object; expected an integer HTTP status.");
+    }
+    if (response.status >= 400) throw new Error(`Quest read failed: HTTP ${response.status}`);
+    if (!isRecord(response.body)) {
+      throw new Error("Quest read returned an invalid body; expected an object containing quests.");
+    }
+    if (!Array.isArray(response.body.quests)) {
+      throw new Error("Quest read returned an invalid quests field; expected an array.");
+    }
+    return response.body.quests;
   }
 
   function createDiscordReadAdapter(context) {
@@ -167,85 +201,50 @@
     let questCacheExpiresAt = 0;
     let inFlight = null;
 
-    const CACHE_TTL_MS = 5000;
-    const MAX_429_RETRIES = 8;
-
     function getApi() {
       if (!api) {
-        api = findExport(
-          "Discord API client",
-          candidate => typeof candidate?.get === "function"
-        );
+        api = findDiscordCapability("API client", candidate => typeof candidate?.get === "function");
       }
-
       return api;
     }
 
     async function fetchQuests({ forceRefresh = false } = {}) {
       context.throwIfAborted();
-
-      if (!forceRefresh && questCache && Date.now() < questCacheExpiresAt) {
-        return questCache;
-      }
-
+      if (!forceRefresh && questCache && Date.now() < questCacheExpiresAt) return questCache;
       if (inFlight) return inFlight;
 
       inFlight = (async () => {
         let retries = 0;
-
         while (true) {
           context.throwIfAborted();
-
           try {
-            const response = await getApi().get({
-              url: "/quests/@me",
-              rejectWithError: false
-            });
-
+            const response = await getApi().get({ url: "/quests/@me", rejectWithError: false });
+            context.throwIfAborted();
             if (response?.status === 429) {
-              if (retries >= MAX_429_RETRIES) {
-                throw new Error("Quest fetch exceeded the 429 retry budget.");
-              }
-
+              if (retries >= MAX_429_RETRIES) throw new Error("Quest read exceeded the 429 retry budget.");
               retries += 1;
-              const retrySeconds = Number(response?.body?.retry_after ?? 5);
-              const retryMs = Math.max(250, Math.ceil(retrySeconds * 1000) + 500);
-
+              const retryMs = readRateLimitDelay(response);
               warn(`Rate limited (${retries}/${MAX_429_RETRIES}); retrying in ${retryMs}ms.`);
               await context.sleep(retryMs);
               continue;
             }
 
-            if (response?.status >= 400) {
-              throw new Error(`Quest request failed: HTTP ${response.status}`);
-            }
-
-            const quests = Array.isArray(response?.body?.quests)
-              ? response.body.quests
-              : [];
-
+            const quests = parseQuestResponse(response);
+            context.throwIfAborted();
             questCache = quests;
             questCacheExpiresAt = Date.now() + CACHE_TTL_MS;
             return quests;
           } catch (error) {
             if (error instanceof OrbAbortError) throw error;
-
-            const status = error?.status ?? error?.response?.status;
-
-            if (status === 429 && retries < MAX_429_RETRIES) {
+            // If an in-flight client request settles after stop(), cancellation wins.
+            context.throwIfAborted();
+            if (responseStatus(error) === 429 && retries < MAX_429_RETRIES) {
               retries += 1;
-              const retrySeconds = Number(
-                error?.body?.retry_after ??
-                error?.response?.body?.retry_after ??
-                5
-              );
-              const retryMs = Math.max(250, Math.ceil(retrySeconds * 1000) + 500);
-
+              const retryMs = readRateLimitDelay(error);
               warn(`Rate limited (${retries}/${MAX_429_RETRIES}); retrying in ${retryMs}ms.`);
               await context.sleep(retryMs);
               continue;
             }
-
             throw error;
           }
         }
@@ -261,57 +260,84 @@
     return Object.freeze({ fetchQuests });
   }
 
-  function getTaskConfig(quest) {
-    const candidates = [
-      quest?.config?.task_config_v2,
-      quest?.config?.task_config
-    ];
+  // Parsing boundary: summaries never mutate input and retain shape diagnostics.
+  function readTaskConfig(quest, diagnostics) {
+    const config = quest?.config;
+    if (!isRecord(config)) {
+      diagnostics.push("Quest config is missing or not an object.");
+      return null;
+    }
 
-    return candidates.find(config => config?.tasks && Object.keys(config.tasks).length)
-      ?? candidates.find(Boolean)
-      ?? null;
+    for (const key of ["task_config_v2", "task_config"]) {
+      const taskConfig = config[key];
+      if (taskConfig == null) continue;
+      if (!isRecord(taskConfig) || !isRecord(taskConfig.tasks)) {
+        diagnostics.push(`${key} is present but has no task object.`);
+        continue;
+      }
+      const taskNames = Object.keys(taskConfig.tasks);
+      if (!taskNames.length) {
+        diagnostics.push(`${key} contains no tasks.`);
+        continue;
+      }
+      return { source: key, tasks: taskConfig.tasks, taskNames };
+    }
+
+    const unexpectedVersions = Object.keys(config).filter(key => /^task_config_v\d+$/.test(key));
+    diagnostics.push(
+      unexpectedVersions.length
+        ? `Unsupported task config version(s): ${unexpectedVersions.join(", ")}.`
+        : "Quest has no supported task config."
+    );
+    return null;
   }
 
-  function getTaskDetails(quest) {
-    const taskConfig = getTaskConfig(quest);
-    const tasks = taskConfig?.tasks ?? {};
-    const taskName = Object.keys(tasks)[0] ?? null;
+  function getTaskDetails(quest, diagnostics) {
+    const taskConfig = readTaskConfig(quest, diagnostics);
+    if (!taskConfig) return null;
 
-    if (!taskName) return null;
+    const [taskName] = taskConfig.taskNames;
+    if (taskConfig.taskNames.length > 1) diagnostics.push(`Multiple tasks found; displaying ${taskName}.`);
+    if (!KNOWN_TASK_NAMES.has(taskName)) diagnostics.push(`Unrecognized task type: ${taskName}.`);
 
+    const task = taskConfig.tasks[taskName];
+    if (!isRecord(task)) diagnostics.push(`Task ${taskName} is not an object.`);
     const progressEntry = quest?.user_status?.progress?.[taskName];
-    const progress = typeof progressEntry === "number"
-      ? progressEntry
-      : Number(progressEntry?.value ?? 0);
-
+    const progressSource = typeof progressEntry === "number" ? progressEntry : progressEntry?.value;
     return {
       taskName,
-      target: Number(tasks?.[taskName]?.target ?? 0),
-      progress: Number.isFinite(progress) ? progress : 0
+      configSource: taskConfig.source,
+      recognized: KNOWN_TASK_NAMES.has(taskName),
+      target: asFiniteNumber(task?.target, `Target for ${taskName}`, diagnostics, null),
+      progress: asFiniteNumber(progressSource, `Progress for ${taskName}`, diagnostics, 0)
     };
   }
 
-  function isAcceptedActiveQuest(quest, now = Date.now()) {
+  function isAcceptedActiveQuest(quest, now, diagnostics) {
     const enrolled = quest?.user_status?.enrolled_at != null;
     const unfinished = quest?.user_status?.completed_at == null;
-    const expiry = Date.parse(quest?.config?.expires_at ?? "");
-    const active = Number.isFinite(expiry) && expiry > now;
-
-    return enrolled && unfinished && active;
+    const expiryValue = quest?.config?.expires_at;
+    const expiry = Date.parse(typeof expiryValue === "string" ? expiryValue : "");
+    if (!Number.isFinite(expiry)) diagnostics.push("Quest expiry is missing or invalid.");
+    return enrolled && unfinished && Number.isFinite(expiry) && expiry > now;
   }
 
-  function summarizeQuest(quest) {
-    const details = getTaskDetails(quest);
-
+  function summarizeQuest(quest, now = Date.now()) {
+    const diagnostics = [];
+    if (!isRecord(quest)) diagnostics.push("Quest entry is not an object.");
+    const details = getTaskDetails(quest, diagnostics);
+    const active = isAcceptedActiveQuest(quest, now, diagnostics);
+    const id = asDisplayText(quest?.id);
     return {
-      id: quest?.id ?? null,
-      name: quest?.config?.messages?.quest_name ?? quest?.id ?? "Unknown quest",
-      application: quest?.config?.application?.name ?? null,
-      expiresAt: quest?.config?.expires_at ?? null,
+      id,
+      name: asDisplayText(quest?.config?.messages?.quest_name, id ?? "Unknown quest"),
+      application: asDisplayText(quest?.config?.application?.name),
+      expiresAt: asDisplayText(quest?.config?.expires_at),
       accepted: quest?.user_status?.enrolled_at != null,
       completed: quest?.user_status?.completed_at != null,
-      active: isAcceptedActiveQuest(quest),
-      task: details
+      active,
+      task: details,
+      diagnostics
     };
   }
 
@@ -319,9 +345,9 @@
     const adapter = createDiscordReadAdapter(context);
     const quests = await adapter.fetchQuests({ forceRefresh: true });
     context.throwIfAborted();
-
-    const summary = quests.map(summarizeQuest);
+    const summary = quests.map(quest => summarizeQuest(quest));
     const acceptedActive = summary.filter(quest => quest.active);
+    const diagnostics = summary.flatMap(quest => quest.diagnostics.map(message => ({ id: quest.id, message })));
 
     log(`Found ${quests.length} quest(s); ${acceptedActive.length} accepted + active.`);
     console.table(acceptedActive.map(quest => ({
@@ -329,123 +355,113 @@
       name: quest.name,
       task: quest.task?.taskName ?? "unknown",
       progress: quest.task?.progress ?? 0,
-      target: quest.task?.target ?? 0,
+      target: quest.task?.target ?? "unknown",
       expiresAt: quest.expiresAt
     })));
-
+    if (diagnostics.length) warn("Quest structures needing review:", diagnostics);
     return summary;
+  }
+
+  // Local mock: validates ownership and cancellation without accessing Discord.
+  function createMockQuest(now = Date.now()) {
+    return {
+      id: "mock-quest-001",
+      config: {
+        expires_at: new Date(now + 60_000).toISOString(),
+        messages: { quest_name: "Orb v2 lifecycle test" },
+        application: { name: "Mock Application" },
+        task_config_v2: { tasks: { MOCK_TASK: { target: 3 } } }
+      },
+      user_status: {
+        enrolled_at: new Date(now - 1_000).toISOString(),
+        completed_at: null,
+        progress: { MOCK_TASK: { value: 0 } }
+      }
+    };
   }
 
   async function runMock(context) {
     const cleanupTrace = [];
-
     context.own(() => cleanupTrace.push("restore-store"));
     context.own(() => cleanupTrace.push("unsubscribe-listener"));
-
     try {
-      const now = Date.now();
-      const mockQuest = {
-        id: "mock-quest-001",
-        config: {
-          expires_at: new Date(now + 60_000).toISOString(),
-          messages: { quest_name: "Orb v2 lifecycle test" },
-          application: { name: "Mock Application" },
-          task_config_v2: {
-            tasks: {
-              MOCK_TASK: { target: 3 }
-            }
-          }
-        },
-        user_status: {
-          enrolled_at: new Date(now - 1_000).toISOString(),
-          completed_at: null,
-          progress: {
-            MOCK_TASK: { value: 0 }
-          }
-        }
-      };
-
+      const mockQuest = createMockQuest();
       log("Mock quest:", summarizeQuest(mockQuest));
-
       for (let progress = 1; progress <= 3; progress += 1) {
         context.throwIfAborted();
         await context.sleep(150);
         mockQuest.user_status.progress.MOCK_TASK.value = progress;
         log(`Mock progress ${progress}/3`);
       }
-
       mockQuest.user_status.completed_at = new Date().toISOString();
       return { summary: summarizeQuest(mockQuest), cleanupTrace };
     } finally {
-      // The mock is a lifecycle test: include completed LIFO cleanup in its result.
-      // run() calls this again safely, which also verifies cleanup idempotence.
+      // executeRun calls cleanup again; RunnerContext makes that safe.
       await context.cleanup();
     }
   }
 
+  // Public boundary: one context owns the process-wide V2 run at any time.
   let activeContext = null;
   let activePromise = null;
 
-  async function stop(reason = "manual stop") {
-    if (!activeContext) {
-      log("No Orb v2 run is active.");
-      return false;
-    }
-
-    activeContext.abort(reason);
-
+  async function executeRun(context, mode) {
+    let result;
+    let runError = null;
     try {
-      await activePromise;
+      log(`Orb v2 ${VERSION} started in ${mode} mode.`);
+      if (mode === "inspect") result = await inspectLive(context);
+      else if (mode === "mock") result = await runMock(context);
+      else throw new Error(`Unknown mode: ${mode}`);
     } catch (error) {
-      if (!(error instanceof OrbAbortError)) throw error;
+      runError = error;
     }
 
-    return true;
+    const cleanupFailures = await context.cleanup();
+    if (runError instanceof OrbAbortError && !cleanupFailures.length) {
+      warn("Run aborted:", runError.message);
+      return null;
+    }
+    if (runError && cleanupFailures.length) {
+      throw new AggregateError([runError, ...cleanupFailures], "Orb run failed and cleanup also failed.");
+    }
+    if (runError) throw runError;
+    if (cleanupFailures.length) {
+      throw new AggregateError(cleanupFailures, "Orb run completed but cleanup failed.");
+    }
+    return result;
   }
 
   async function run(options = {}) {
     const mode = options.mode ?? "inspect";
-
-    if (activeContext) {
-      throw new Error("Orb v2 is already running. Call orbV2.stop() first.");
-    }
+    if (activeContext) throw new Error("Orb v2 is already running. Call orbV2.stop() first.");
 
     const context = new RunnerContext(mode);
     activeContext = context;
-
     activePromise = (async () => {
       try {
-        log(`Orb v2 ${VERSION} started in ${mode} mode.`);
-
-        if (mode === "inspect") {
-          return await inspectLive(context);
-        }
-
-        if (mode === "mock") {
-          return await runMock(context);
-        }
-
-        throw new Error(`Unknown mode: ${mode}`);
-      } catch (error) {
-        if (error instanceof OrbAbortError) {
-          warn("Run aborted:", error.message);
-          return null;
-        }
-
-        throw error;
+        return await executeRun(context, mode);
       } finally {
-        await context.cleanup();
-
         if (activeContext === context) {
           activeContext = null;
           activePromise = null;
         }
-
         log("Orb v2 run finished and cleanup completed.");
       }
     })();
+    return activePromise;
+  }
 
-    return await activePromise;
+  async function stop(reason = "manual stop") {
+    const context = activeContext;
+    const promise = activePromise;
+    if (!context || !promise) {
+      log("No Orb v2 run is active.");
+      return false;
+    }
+    context.abort(reason);
+    await promise;
+    return true;
   }
 
   function status() {
@@ -454,27 +470,27 @@
       active: Boolean(activeContext),
       mode: activeContext?.label ?? null,
       startedAt: activeContext?.startedAt ?? null,
-      aborted: activeContext?.signal?.aborted ?? false
+      aborted: activeContext?.signal?.aborted ?? false,
+      cleanupFailures: activeContext?.cleanupFailures?.length ?? 0
     };
   }
 
   window.orbV2 = Object.freeze({
     version: VERSION,
-    run,
-    stop,
-    status,
     inspect: () => run({ mode: "inspect" }),
-    mock: () => run({ mode: "mock" })
+    mock: () => run({ mode: "mock" }),
+    status,
+    stop
   });
 
-  // Test-only injection point. It is populated only when a harness provides an
-  // object before this script loads; the production API remains read-only.
+  // Injected only by the isolated Node harness before loading this script.
   const testHooks = window.__orbV2TestHooks;
-  if (testHooks && typeof testHooks === "object") {
+  if (isRecord(testHooks)) {
     Object.assign(testHooks, {
       OrbAbortError,
       RunnerContext,
       createDiscordReadAdapter,
+      createMockQuest,
       getWebpackRequire,
       summarizeQuest
     });

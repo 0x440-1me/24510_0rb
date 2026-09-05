@@ -1,65 +1,53 @@
-# dc_cmd_script
+# Orb v2 — lifecycle-safe research harness
 
-🛠️  Welcome to the lab.
+Orb v2 is a small, read-only JavaScript research harness for studying resilient client integration patterns: cancellation, cleanup ownership, defensive parsing, and testing against unstable internal boundaries.
 
-`dc_cmd_script.js` is a Discord quest recon / automation payload. It crawls the Discord client for hidden webpack exports, hooks into quest state, and attempts to drive accepted quests from the inside.
+It is deliberately not a quest-completion tool. V2 does not write quest progress, alter local Discord state, fabricate events, or provide bypass mechanisms. Its live mode makes one read-only request for quest metadata; its mock mode does not access Discord at all.
 
-> **For educational research only.** 
+## Quick start
 
-## what it does
+Run the deterministic test suite with a current Node.js release:
 
-This script is the kind of thing you drop into the console when you want to see what Discord is hiding behind the scenes.
-
-- hunts internal Discord modules using webpackChunk logic
-- extracts quest state and user progress data
-- identifies accepted active quests for the logged-in user
-- applies spoofed progress strategies for supported quests
-- auto-retries when Discord rate-limits quest fetches
-- exposes `window.stopQuestRunner()` to kill the payload cleanly
-
-## supported quest payloads
-
-- `WATCH_VIDEO` / `WATCH_VIDEO_ON_MOBILE`
-  - forges video progress updates directly through Discord's quest API.
-- `PLAY_ON_DESKTOP`
-  - simulates a desktop app session by spoofing running game metadata.
-- `STREAM_ON_DESKTOP`
-  - fakes stream metadata so Discord thinks you're streaming.
-- `PLAY_ACTIVITY`
-  - pumps heartbeat updates to emulate activity.
-
-## drop-in usage
-
-1. open Discord.
-2. open devtools / console in the Discord client.
-3. paste the contents of `dc_cmd_script.js`.
-4. watch it scan and process your accepted quests.
-
-stop it anytime:
-
-```js
-window.stopQuestRunner();
+```sh
+node --test orb_v2.test.js
 ```
 
-## why this exists
+For manual read-only research in a Discord client console, load `orb_v2.js`, then use:
 
-This repo is a study in Discord client internals and quest flow mechanics. It's about:
+```js
+orbV2.inspect(); // Read-only quest metadata summary
+orbV2.mock();    // Local lifecycle simulation; no Discord access
+orbV2.status();  // Active-run state and cleanup status
+orbV2.stop();    // Abort the active V2 run
+```
 
-- doing recon on Discord's webpack-bundled runtime
-- finding the hidden stores and dispatchers that power quest updates
-- understanding how quest progress can be observed and manipulated
+Only one V2 run may own the process at a time. A second start rejects until the first finishes or is stopped. Re-running after a stopped or failed run is supported.
 
-## notes from the field
+## Project layout
 
-- browser-only runs may not fully support desktop-level quest spoofing.
-- some quests still need legit client state or real interaction.
-- Discord updates can break the detection logic fast.
-- use this responsibly — it's an experiment, not a cheat sheet.
+| Path | Purpose |
+| --- | --- |
+| `orb_v2.js` | Browser entry point: lifecycle, read-only Discord adapter, parsing, mock, and small public API |
+| `orb_v2.test.js` | Isolated Node test harness with mocked Discord, webpack, HTTP, and timers |
+| `docs/orb-v2-architecture.md` | V1-versus-V2 design comparison and boundaries |
+| `docs/orb-v2-test-notes.md` | Test matrix and local validation instructions |
+| `docs/orb-v2-benchmark.md` | Fair comparison method for another implementation |
+| `dc_cmd_script.js` | Legacy V1 artifact; not part of V2 and intentionally not extended |
 
-## author
+## What V2 fixes from V1
 
-- `0x440_1me`
+The legacy script centralizes work in one long control flow, relies on a global stop flag, retries rate limits without a budget, and restores resources in task-specific branches. That makes cancellation, failures, and client-version drift difficult to reason about.
 
----
+V2 assigns every run a `RunnerContext` with an `AbortController`, abortable waits, LIFO cleanup registration, bounded 429 retries, and a single-active-run guard. Discord-specific discovery is contained in a read adapter; quest parsing emits diagnostics instead of assuming a fixed payload shape.
 
-This is a research artifact. Keep it in the lab.
+See [the architecture note](docs/orb-v2-architecture.md) for the concise side-by-side.
+
+## Comparison method
+
+To compare Orb v2 fairly against another implementation, run both through the same isolated lifecycle and parsing cases, record behavior and diagnostics, then compare only the observable results. Do not compare or reward capabilities that alter quest progress or evade platform controls.
+
+The exact matrix and scorecard are in [the benchmark guide](docs/orb-v2-benchmark.md).
+
+## Known boundary
+
+Discord internal exports and payload shapes can change without notice. V2 detects and describes missing webpack/API capabilities and malformed payloads, but no local test can guarantee compatibility with every live Discord build. Treat `inspect()` output as research data, not a stable contract.
