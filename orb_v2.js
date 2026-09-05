@@ -342,41 +342,45 @@
     context.own(() => cleanupTrace.push("restore-store"));
     context.own(() => cleanupTrace.push("unsubscribe-listener"));
 
-    const now = Date.now();
-    const mockQuest = {
-      id: "mock-quest-001",
-      config: {
-        expires_at: new Date(now + 60_000).toISOString(),
-        messages: { quest_name: "Orb v2 lifecycle test" },
-        application: { name: "Mock Application" },
-        task_config_v2: {
-          tasks: {
-            MOCK_TASK: { target: 3 }
+    try {
+      const now = Date.now();
+      const mockQuest = {
+        id: "mock-quest-001",
+        config: {
+          expires_at: new Date(now + 60_000).toISOString(),
+          messages: { quest_name: "Orb v2 lifecycle test" },
+          application: { name: "Mock Application" },
+          task_config_v2: {
+            tasks: {
+              MOCK_TASK: { target: 3 }
+            }
+          }
+        },
+        user_status: {
+          enrolled_at: new Date(now - 1_000).toISOString(),
+          completed_at: null,
+          progress: {
+            MOCK_TASK: { value: 0 }
           }
         }
-      },
-      user_status: {
-        enrolled_at: new Date(now - 1_000).toISOString(),
-        completed_at: null,
-        progress: {
-          MOCK_TASK: { value: 0 }
-        }
+      };
+
+      log("Mock quest:", summarizeQuest(mockQuest));
+
+      for (let progress = 1; progress <= 3; progress += 1) {
+        context.throwIfAborted();
+        await context.sleep(150);
+        mockQuest.user_status.progress.MOCK_TASK.value = progress;
+        log(`Mock progress ${progress}/3`);
       }
-    };
 
-    log("Mock quest:", summarizeQuest(mockQuest));
-
-    for (let progress = 1; progress <= 3; progress += 1) {
-      context.throwIfAborted();
-      await context.sleep(150);
-      mockQuest.user_status.progress.MOCK_TASK.value = progress;
-      log(`Mock progress ${progress}/3`);
+      mockQuest.user_status.completed_at = new Date().toISOString();
+      return { summary: summarizeQuest(mockQuest), cleanupTrace };
+    } finally {
+      // The mock is a lifecycle test: include completed LIFO cleanup in its result.
+      // run() calls this again safely, which also verifies cleanup idempotence.
+      await context.cleanup();
     }
-
-    mockQuest.user_status.completed_at = new Date().toISOString();
-    log("Mock quest completed; cleanup will run in LIFO order.");
-
-    return { summary: summarizeQuest(mockQuest), cleanupTrace };
   }
 
   let activeContext = null;
@@ -462,6 +466,19 @@
     inspect: () => run({ mode: "inspect" }),
     mock: () => run({ mode: "mock" })
   });
+
+  // Test-only injection point. It is populated only when a harness provides an
+  // object before this script loads; the production API remains read-only.
+  const testHooks = window.__orbV2TestHooks;
+  if (testHooks && typeof testHooks === "object") {
+    Object.assign(testHooks, {
+      OrbAbortError,
+      RunnerContext,
+      createDiscordReadAdapter,
+      getWebpackRequire,
+      summarizeQuest
+    });
+  }
 
   log(`Loaded Orb v2 ${VERSION}.`);
   log("Use orbV2.inspect(), orbV2.mock(), orbV2.status(), or orbV2.stop().");
