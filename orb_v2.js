@@ -62,20 +62,19 @@
       this.throwIfAborted();
 
       await new Promise((resolve, reject) => {
-        const timer = setTimeout(done, milliseconds);
+        let timer = null;
 
         const onAbort = () => {
-          clearTimeout(timer);
+          if (timer !== null) clearTimeout(timer);
+          this.signal.removeEventListener("abort", onAbort);
           reject(new OrbAbortError(String(this.signal.reason ?? "aborted")));
         };
 
-        function done() {
-          this.signal?.removeEventListener?.("abort", onAbort);
+        timer = setTimeout(() => {
+          this.signal.removeEventListener("abort", onAbort);
           resolve();
-        }
+        }, milliseconds);
 
-        // Bind the signal explicitly so the timer callback remains tiny.
-        done = done.bind(this);
         this.signal.addEventListener("abort", onAbort, { once: true });
       });
     }
