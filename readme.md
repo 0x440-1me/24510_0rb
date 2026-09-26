@@ -14,8 +14,9 @@ This script is the kind of thing you drop into the console when you want to see 
 - extracts quest state and user progress data
 - identifies accepted active quests for the logged-in user
 - applies spoofed progress strategies for supported quests
-- auto-retries when Discord rate-limits quest fetches
-- exposes `window.stopQuestRunner()` to kill the payload cleanly
+- automatically retries the quest runner after it stops, respecting Discord rate-limit delays
+- exposes `window.stopQuestRunner()` to stop the active runner
+- exposes `window.stopQuestProgram()` to stop the full recurring program
 
 ## supported quest payloads
 
@@ -35,10 +36,15 @@ This script is the kind of thing you drop into the console when you want to see 
 3. paste the contents of `dc_cmd_script.js`.
 4. watch it scan and process your accepted quests.
 
-stop it anytime:
+stop the active runner anytime:
 
 ```js
 window.stopQuestRunner();
+```
+To stop the full recurring program:
+
+```js
+window.stopQuestProgram();
 ```
 
 ## why this exists
@@ -55,6 +61,15 @@ This repo is a study in Discord client internals and quest flow mechanics. It's 
 - some quests still need legit client state or real interaction.
 - Discord updates can break the detection logic fast.
 - use this responsibly — it's an experiment, not a cheat sheet.
+
+## changelog
+
+### 2026-09-26
+
+- Added automatic enrollment for available quests before each runner cycle.
+- Added recurring runner cycles with a 60-second minimum pause and Discord Retry-After handling.
+- The program exits after no unaccepted available quests remain.
+- Added `window.stopQuestProgram()` to stop the full loop; `window.stopQuestRunner()` stops the active runner.
 
 ## author
 
