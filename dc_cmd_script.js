@@ -1,9 +1,162 @@
 (async () => {
+    let stopProgram = false;
+    let noUnacceptedAvailable = false;
+    let stopLoopWake = null;
+    window.stopQuestProgram = () => {
+        stopProgram = true;
+        window.stopQuestRunner?.();
+        stopLoopWake?.();
+        console.log("[0x440] Program stop requested.");
+    };
+
+    while (!stopProgram) {
+        try {
+
 
 	// ============================================================
 	// hax by 0x440-1me ;d
 	// Discord Quest Runner
 	// ============================================================
+
+	 // Accept one available quest before starting the original runner.
+	 await (async () => {
+	     const TAG = "[AUTO-QUEST-ACCEPT]";
+	     const log = (...args) => console.log(TAG, ...args);
+
+	     const wpRequire = window.webpackChunkdiscord_app.push([
+	         [Math.random().toString(36)],
+	         {},
+	         require => require
+	     ]);
+
+	     window.webpackChunkdiscord_app.pop();
+
+	     function findExport(matcher) {
+	         for (const module of Object.values(wpRequire.c)) {
+	             const exports = module?.exports;
+	             if (!exports)
+	                 continue;
+
+	             try {
+	                 const result = matcher(exports);
+	                 if (result)
+	                     return result;
+	             } catch {}
+	         }
+
+	         return null;
+	     }
+
+	     const api = findExport(exports =>
+	         exports.Bo?.get &&
+	         exports.Bo?.post &&
+	         exports.Bo
+	     );
+
+	     const QuestsStore = findExport(exports =>
+	         exports.A?.getQuest &&
+	         exports.A
+	     );
+
+	     if (!api)
+	         throw new Error("Could not find Discord API module.");
+
+	     function isAvailable(quest) {
+	         if (!quest?.id)
+	             return false;
+
+	         if (quest?.user_status?.enrolled_at != null)
+	             return false;
+
+	         if (quest?.user_status?.completed_at != null)
+	             return false;
+
+	         const expiry = Date.parse(
+	             quest?.config?.expires_at ?? ""
+	         );
+
+	         return !Number.isFinite(expiry) || expiry > Date.now();
+	     }
+
+	     const response = await api.get({
+	         url: "/quests/@me",
+	         rejectWithError: false
+	     });
+
+	     if (response?.status === 429) {
+	         const retryAfter = Number(response?.body?.retry_after);
+	         window.__questRunnerRetryAfterMs =
+	             Number.isFinite(retryAfter) && retryAfter > 0
+	                 ? retryAfter * 1000
+	                 : 60000;
+	         log("Quest fetch rate limited; next cycle will honor Retry-After.");
+	         return;
+	     }
+
+	     if (response?.status >= 400)
+	         throw new Error("Quest fetch failed: HTTP " + response.status);
+
+	     const quests = response?.body?.quests ?? [];
+	     const quest = quests.find(isAvailable);
+
+	     if (!quest) {
+	         noUnacceptedAvailable = true;
+	         log("No unaccepted available quests found.");
+	         return;
+	     }
+
+	     const name =
+	         quest?.config?.messages?.quest_name ??
+	         quest?.config?.application?.name ??
+	         quest.id;
+
+	     let trafficMetadata = null;
+
+	     try {
+	         trafficMetadata =
+	             QuestsStore
+	                 ?.getQuest?.(quest.id)
+	                 ?.trafficMetadataSealed ??
+	             quest?.trafficMetadataSealed ??
+	             quest?.traffic_metadata_sealed ??
+	             null;
+	     } catch {}
+
+	     log("Accepting: " + name);
+
+	     const enrollResponse = await api.post({
+	         url: "/quests/" + quest.id + "/enroll",
+	         body: {
+	             location: 11,
+	             is_targeted: false,
+	             metadata_sealed: null,
+	             traffic_metadata_sealed: trafficMetadata
+	         },
+	         rejectWithError: false
+	     });
+
+	     if (enrollResponse?.status === 429) {
+	         const retryAfter = Number(enrollResponse?.body?.retry_after);
+	         window.__questRunnerRetryAfterMs =
+	             Number.isFinite(retryAfter) && retryAfter > 0
+	                 ? retryAfter * 1000
+	                 : 60000;
+	         log("Enrollment rate limited; next cycle will honor Retry-After.");
+	         return;
+	     }
+
+	     if (enrollResponse?.status >= 200 && enrollResponse?.status < 300) {
+	         log("✓ Accepted: " + name);
+	     } else {
+	         console.warn(
+	             TAG,
+	             "Failed to accept " + name,
+	             enrollResponse?.status,
+	             enrollResponse?.body
+	         );
+	     }
+	 })();
+	if (stopProgram) break;
 
 	delete window.$;
 
@@ -1548,8 +1701,28 @@
 
 
 	await runAllAcceptedQuests();
+        } catch (error) {
+            const status = error?.status ?? error?.response?.status;
+            if (status === 429) {
+                const retryAfter = Number(error?.body?.retry_after ?? error?.response?.body?.retry_after);
+                window.__questRunnerRetryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 60000;
+            }
+            console.error("[0x440] Quest runner cycle failed:", error);
+        }
 
+        if (stopProgram || noUnacceptedAvailable)
+            break;
 
+        const retryAfterMs = Number(window.__questRunnerRetryAfterMs);
+        const delayMs = Math.max(60000, Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0);
+        window.__questRunnerRetryAfterMs = 0;
+        console.log("[0x440] Cycle stopped; restarting in " + Math.ceil(delayMs / 1000) + " seconds. Call window.stopQuestProgram() to stop.");
+        await new Promise(resolve => {
+            const timer = setTimeout(resolve, delayMs);
+            stopLoopWake = () => { clearTimeout(timer); resolve(); };
+        });
+        stopLoopWake = null;
+    }
 })().catch(error => {
 
 	console.error(
