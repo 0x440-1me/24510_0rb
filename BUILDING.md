@@ -1,0 +1,69 @@
+# Building 24510_0rb
+
+Build/test commands require a source checkout of the reviewed native revision.
+The runtime release ZIP intentionally excludes source, build scripts and tests;
+obtain the corresponding repository source before following these instructions.
+
+## Toolchain
+
+Use Windows x64 and MSYS2 **UCRT64** GCC, binutils, headers and CRT. Install the compiler toolchain through your approved MSYS2 installation; in its UCRT64 terminal:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-toolchain
+```
+
+From a Windows command prompt at the repository root:
+
+```bat
+scripts\build.bat
+```
+
+The script selects ORB_GCC first, then MSYS2_LOCATION\ucrt64\bin\gcc.exe, known installation locations, then PATH. An invalid explicit compiler fails. It verifies the x64 MinGW target and UCRT headers. C11, -Wall/-Wextra/-Wpedantic/-Werror, -O2, source prefix mapping and a zero PE linker timestamp are enabled.
+
+## Explicit compiler and independent output
+
+```bat
+set "MSYS2_LOCATION=C:\msys64"
+set "ORB_OUT_DIR=C:\orb-build"
+scripts\build.bat
+```
+
+ORB_GCC may instead name the exact UCRT64 gcc.exe. ORB_OUT_DIR defaults to bin; set another directory while your app is open to avoid overwriting its running image. Both required production executables and harmless payloads are generated. Test/mock binaries are development outputs and are excluded from packages. The production app has no mock override.
+
+## Tests
+
+Tests require an already approved PowerShell environment that permits the repository scripts. No script changes execution policy or adds bypass flags. A policy refusal is a separate blocked result; do not retry it through an alternative launch route. The current development VM's public Windows PowerShell wrapper was refused; approved direct component evidence is documented separately.
+
+Native component driver and mock fixture commands, using default bin output:
+
+```powershell
+.\bin\process-test.exe
+& .\tests\foundation.ps1 -EvidenceDirectory C:\orb-evidence\foundation
+& .\tests\gui.ps1 -EvidenceDirectory C:\orb-evidence\gui
+```
+
+No real account is needed for these fixtures. The GUI harness scopes interactions to its launched app PID/class and confirms restart only in its separately labeled mock build. Real Discord integration and real restart require separate permission; automation must respect execution guards. An independent ORB_OUT_DIR is for compilation/packaging; scripts/test.bat refuses a non-default output directory before building so it cannot test stale bin executables. Current component scripts expect bin unless supplied equivalent test paths.
+
+## Packaging and reproducibility
+
+Use an approved PowerShell environment with .NET ZipArchive support:
+
+```powershell
+& .\scripts\package.ps1 -BuildDirectory C:\orb-build -OutputDirectory C:\orb-package
+```
+
+Release packaging requires a clean source checkout. For private review of uncommitted changes only, add **-Development**; the manifest explicitly marks the dirty development source. Do not publish that package as a clean tagged release.
+
+The package has an explicit file whitelist, ordinal entry ordering, fixed ZIP timestamp 2000-01-01T00:00:00Z and stable metadata. It includes both production executables, harmless payloads, usable README/supporting docs/images, scoped license and build-manifest.json. Mocks, tests, legacy files, preferences and private evidence are excluded. SHA256SUMS.txt checks the named ZIP.
+
+Reproducibility is demonstrated only for identical source, compiler/SDK/binutils and PowerShell/.NET compression runtime. Their actual versions and binary hashes are recorded in the manifest. Different compiler, headers, future runner image or compression runtime can change bytes. A clean tagged source build is required for the eventual release.
+
+## Hosted workflows
+
+The source includes native Windows build and tag-release workflows with immutable action commit pins. Hosted execution has not happened yet. The windows-2025 runner installs UCRT64 GCC/binutils/headers/CRT, uses the setup action's actual installation location and builds with the same batch script. The shared ci.ps1 accepts only the Windows x64 Actions environment and default bin output; do not invoke it against a user-owned local running app.
+
+Pull requests, main/native feature pushes and manual dispatch build and run the native mocked process, foundation and GUI fixtures in the hosted runner's approved pwsh environment. No Discord/account is used and restart affirmation occurs only in the compile-time mock app. This separate host does not retry the development VM's blocked WindowsPS wrapper.
+
+Successful jobs package clean source outside the checkout, verify every asset, import dependencies, source/version/dirty flags and usable README links, repeat the ZIP hash, and upload only the release ZIP/checksum as a wrapped build artifact. Mock/build evidence is a separate artifact available on failures. Actual versions are recorded; future mutable runner/toolchain versions may differ.
+
+Tag release accepts only an exact vMAJOR.MINOR.PATCH matching VERSION and the checked-out event SHA; that commit must belong to current origin/main history. A separate contents:write job downloads the verified two-file artifact with digest mismatch treated as an error, repeats checksum/provenance checks and creates a new release with controlled notes. Existing releases/tags/assets are never overwritten. Hosted GUI interaction, artifact transfer and publication remain unproven until a reviewed run. No tag or release is created by source preparation.

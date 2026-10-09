@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png -text
+legacy/dc_cmd_script.js text eol=crlf
+legacy/original-readme.md text eol=crlf
