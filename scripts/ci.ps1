@@ -12,9 +12,12 @@ Push-Location $root
 try {
     if($env:ORB_OUT_DIR){throw 'Hosted CI requires default bin output; ORB_OUT_DIR must be unset.'}
     if(-not $env:MSYS2_LOCATION){throw 'MSYS2 setup location is required.'}
+    $null=New-Item -ItemType Directory -Force -Path $EvidenceDirectory
     if(@(Get-Process Discord,DiscordPTB,DiscordCanary -ErrorAction SilentlyContinue).Count){throw 'CI fixtures require no running Discord client.'}
     $revision=(& git rev-parse HEAD).Trim();if($LASTEXITCODE -or $revision -cne $ExpectedSourceSha){throw 'Checked out source differs from event SHA.'}
-    $status=@(& git status --porcelain=v1);if($LASTEXITCODE -or $status.Count){throw 'CI requires a clean source checkout.'}
+    $status=@(& git status --porcelain=v1)
+    $status|Set-Content (Join-Path $EvidenceDirectory 'source-status.txt')
+    if($LASTEXITCODE -or $status.Count){Write-Output ($status -join "`n");throw 'CI requires a clean source checkout.'}
     $version=[IO.File]::ReadAllText((Join-Path $root 'VERSION')).Trim()
     if($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'){throw 'VERSION must be a supported semantic version.'}
     if($ReleaseTag){
@@ -23,7 +26,6 @@ try {
         & git merge-base --is-ancestor $revision FETCH_HEAD;if($LASTEXITCODE){throw 'Tagged commit is not in current origin/main history.'}
         $tagCommit=(& git rev-parse "$ReleaseTag^{commit}").Trim();if($LASTEXITCODE -or $tagCommit -cne $revision){throw 'Tag does not resolve to the checked out source.'}
     }
-    $null=New-Item -ItemType Directory -Force -Path $EvidenceDirectory
     & cmd.exe /d /c scripts\build.bat *> (Join-Path $EvidenceDirectory 'build.log')
     if($LASTEXITCODE){throw 'Native build failed; see build.log.'}
     & .\bin\process-test.exe *> (Join-Path $EvidenceDirectory 'process.log')
