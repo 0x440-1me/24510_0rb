@@ -2,16 +2,25 @@ Native C11 / Win32 controller with a packaged WinHTTP helper, external Unicode
 JavaScript files, on-demand renderer verification, settings and explicit restart
 consent. Extract the ZIP and keep both production executables together.
 
-Requires Windows10 1809+ or Windows11 x64. No Node.js, Python, Electron, Visual
+Requires Windows 10 version 1809+ or Windows 11 x64. No Node.js, Python, Electron, Visual
 Studio or GCC runtime installation is needed by the native application.
 
-The tagged workflow builds with MSYS2 UCRT64, runs account-free mock foundation,
-native process and GUI fixtures, verifies every package asset and repeats ZIP
-hashes under the same toolchain/runtime. See the build manifest for exact versions.
+The first verified account-free Windows Server 2025 CI runs passed native process
+52/52, Foundation 37/37 and mock GUI 27/27 with 310 assertions:
+https://github.com/0x440-1me/24510_0rb/actions/runs/38005830743
+https://github.com/0x440-1me/24510_0rb/actions/runs/38005826992
+Their downloaded build artifacts, all manifest assets and repeated ZIP hashes
+were verified. Those builds used GCC 16.2.0 Rev5; they did not use real Discord.
+
+The tagged workflow builds with MSYS2 UCRT64, repeats account-free tests and
+verifies every package asset before its separate publish job. The release notes
+identify the tagged source revision; build-manifest.json records the actual
+source, compiler/SDK/binutils and PowerShell/.NET versions and binary hashes.
 Different future toolchains/runner/compression runtimes may change bytes.
 
-Prior permitted Windows11 real renderer checks used only harmless handshake,
-evaluation, exceptions and Unicode file edits. Restart sequencing/affirmative UI
+Prior permitted Windows 11 real renderer checks used a separate local GCC Rev4
+build and only harmless handshake, evaluation, exceptions and Unicode file edits.
+These are not real-CDP tests of the hosted Rev5 binaries. Restart sequencing/affirmative UI
 were mock-tested. Automated real Discord restart and the development VM's public
 WindowsPS test wrapper remain blocked without bypass; user manual restart outcome
 is pending. Physical DPI migration and injected OS/allocation faults are unverified.
@@ -23,4 +32,8 @@ monitoring. Use trusted payloads and an authorized loopback debugging setup only
 
 MIT covers the new native application/supporting files; original legacy material
 has unchanged rights and is excluded from release packages. Unofficial project,
-unaffiliated with Discord. SHA256SUMS.txt verifies the attached ZIP.
+unaffiliated with Discord. Check the public ZIP against SHA256SUMS.txt after
+download, then verify its manifest identifies the release's tagged source.
+Publication/download-verification records are maintained at:
+https://github.com/0x440-1me/24510_0rb/issues/2
+https://github.com/0x440-1me/24510_0rb/releases

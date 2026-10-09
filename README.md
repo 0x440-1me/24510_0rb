@@ -19,12 +19,14 @@
 
 ## Download and run
 
-**v0.2.0 is being prepared; CI and tag-release workflows are present in source but have not run on GitHub yet, and no native release is published.** See the [release page](https://github.com/0x440-1me/24510_0rb/releases). After the first verified release is published, the [latest release](https://github.com/0x440-1me/24510_0rb/releases/latest) will provide:
+Download from the [latest release](https://github.com/0x440-1me/24510_0rb/releases/latest), or choose [v0.2.0](https://github.com/0x440-1me/24510_0rb/releases/tag/v0.2.0) on the [release page](https://github.com/0x440-1me/24510_0rb/releases). The v0.2.0 workflow produces these release files:
 
 - `24510_0rb-v0.2.0-windows-x64.zip`
 - `SHA256SUMS.txt`
 
 Check the ZIP's SHA-256 against SHA256SUMS.txt, extract it into a writable folder, and run **24510_0rb.exe**. Keep **orb-cdp.exe** beside it and retain the payloads folder. The application selects hello.js at startup and does not run it automatically.
+
+The tag workflow publishes only after its build, tests and package checks pass. See [Issue #2](https://github.com/0x440-1me/24510_0rb/issues/2) for publication and downloaded-release verification records; a build artifact alone is not a published release.
 
 ### Requirements
 
@@ -32,7 +34,7 @@ Check the ZIP's SHA-256 against SHA256SUMS.txt, extract it into a writable folde
 - An installed Discord stable/PTB/canary client and an authorized local debugging endpoint.
 - No elevated permission is normally needed. The app requests asInvoker execution.
 
-Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). Hosted CI runs account-free fixtures; a matching version tag builds and verifies a clean package before its separate publish job. These workflows still require their first hosted execution and review.
+Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The first verified hosted [PR build](https://github.com/0x440-1me/24510_0rb/actions/runs/38005830743) and [feature build](https://github.com/0x440-1me/24510_0rb/actions/runs/38005826992) passed account-free fixtures on Windows Server 2025: native process 52/52, Foundation 37/37 and mock GUI 27/27 with 310 assertions. These runs used GCC 16.2.0 Rev5; prior harmless real-CDP evidence came from a Windows 11 local build with Rev4, not the hosted binaries. See [current Actions](https://github.com/0x440-1me/24510_0rb/actions) and [test results](docs/test-results.md) for scope and provenance.
 
 ## Connect
 
@@ -87,6 +89,6 @@ Validated behavior includes harmless real renderer handshake/evaluation/exceptio
 
 ## Legacy and license
 
-The original author's script and documentation are preserved byte-for-byte in the repository's **legacy/** directory, with historical attribution **0x440_1me**. They are reference artifacts, excluded from release payloads and never automatically executed. The legacy script contains unofficial Quest spoofing; its presence does not make it a supported app feature.
+The original author's script and documentation are preserved byte-for-byte with their original Git blobs in the repository's **legacy/** directory, with historical attribution **0x440_1me**. Text conversion is disabled for those two original files. They are reference artifacts, excluded from release payloads and never automatically executed. The legacy script contains unofficial Quest spoofing; its presence does not make it a supported app feature.
 
 [LICENSE](LICENSE) grants MIT terms only for the new native application and supporting files, including the supplied reused C core. Original legacy files and material with unresolved upstream rights are explicitly excluded. See [CHANGELOG.md](CHANGELOG.md).
