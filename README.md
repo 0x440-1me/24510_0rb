@@ -1,21 +1,72 @@
 # 24510_0rb
 
-**Native Windows controller for local Discord JavaScript experiments.**
+**24510_0rb v1.0.0 (unreleased development build).**
 
-24510_0rb is a C11 / Win32 application that connects to a local Discord renderer through CDP, loads an external JavaScript file and shows its result. It packages the proven native WinHTTP injector as a small companion executable. No Node.js, Python, Electron or Visual Studio runtime is required.
+**The latest PUBLIC release remains v0.2.0 until approval.** This checkout is an unreleased development build, not a public release.
+
+24510_0rb is a native C11 / Win32 controller for a consent-based Discord Quest experiment. It connects to an approved local renderer through CDP, reviews exact local JavaScript bytes, and presents bounded, privacy-conscious status. No Node.js, Python, Electron or Visual Studio runtime is required.
 
 ## Features
 
-- Native interface with Connect, Restart Discord, Load Script, Run Script, Stop, Logs and Settings.
-- Unicode payload selection; each run reads the current file contents.
+- Four clear primary actions: Restart Discord to Connect, Start Orb, Stop Orb, and All completed!/Retry.
+- Unicode payload selection; per-run consent locks and hashes the exact bytes.
+- Original Orb (experimental) import/review with separately attributed bundled original.
+- Quick start/About, helper preflight and honest renderer stop requests.
 - Configurable loopback port, bounded operation timeouts and readable errors.
 - Renderer handshake verification with a timestamp, and Discord process state from the last check.
 - Explicit restart consent, exact installed-image selection and graceful shutdown failure handling.
 - Responsive workers, bounded logs and cancellation of the application's own helper.
 
-![Native controller](docs/images/app.png)
+### Historical v0.2 screenshots
 
-*Validation screenshot. It predates the refined “Discord (last check)” label; process state is a snapshot, not continuous monitoring.*
+![Historical v0.2 native controller](docs/images/app.png)
+
+*Historical v0.2 capture; not the v1.0.0 development UI.*
+
+
+
+### v1.0.0 mock-mode screenshots
+
+| Ready | Running | All completed |
+| --- | --- | --- |
+| ![Ready](docs/images/v1-ready.png) | ![Running](docs/images/v1-running.png) | ![All completed](docs/images/v1-completed.png) |
+
+*Mock-mode test captures; not live Discord validation.*
+
+## v1.0.0 behavior (unreleased development build)
+
+The four primary actions guide the run lifecycle. **Restart Discord to Connect** always asks for explicit confirmation. **Start Orb** requires explicit per-run consent; the in-app Discord page must be ready at `/quest-home` and remain open while it runs. **Stop Orb** makes a best-effort cooperative request and cannot guarantee cleanup or rollback. **All completed!** appears only after a reliable eligible-quest scan; **Retry** performs another read-only scan.
+
+Nothing auto-starts on launch, Connect, restart, or file selection. Rate limits and unknown or unreliable renderer state fail closed: the app does not infer completion or automatically retry, and it blocks another start until a safe verified reset.
+
+Mock-mode screenshots and synthetic tests do not validate live Discord behavior or real-account results.
+
+
+
+
+
+Choose **Original Orb (experimental)** to review the bundled original, or
+**Select local .js...** to import a file without console copy/paste. Nothing
+runs until you affirm the per-run warning and hash. The file is locked through
+dispatch, and the helper checks its outgoing bytes against that SHA-256.
+The self-starting original automatically enrolls/updates Quests and fakes
+activity using the authenticated Discord client; it may violate Discord rules.
+See [original permission and risk notice](legacy/NOTICE.md).
+
+**Cancel helper** cancels only the local helper. **Request Orb stop** sends the
+existing `window.stopQuestProgram()` hook if available and reports **Stop
+requested / state unknown**, including when the hook is missing. It cannot
+prove cleanup, rollback or completion. The controller blocks repeat starts
+after an Original Orb dispatch attempt until a verified consent-based restart.
+The latch is session-local; closing the controller does not stop renderer code.
+One controller instance per desktop prevents accidental simultaneous windows.
+
+Routine logs withhold renderer results, exceptions, events, titles, URLs and
+raw version JSON, including with `--verbose`. Connect/Run/Stop/check refuse
+foreign or wildcard listeners using the installed-process ownership policy.
+Process checks reduce endpoint races but cannot provide an atomic Windows
+socket-to-process guarantee. Installed paths are validated; no code-signing
+or binary authenticity guarantee is claimed.
 
 ## Download and run
 
@@ -48,15 +99,17 @@ Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The fir
 
 ![Restart consent dialog](docs/images/restart.png)
 
+*Historical v0.2 screenshot; not the v1.0.0 development UI.*
+
 **Restart Discord** opens a warning about interrupted calls, streams and other activities. **Cancel is the default**; Cancel, Escape and the dialog close button leave Discord untouched. Only the affirmative button starts the restart worker.
 
 The app selects an approved installation, checks IPv4/IPv6 port ownership, requests ordinary window close, waits for exit, rechecks the port and launches the selected executable with loopback-only debugging arguments. It never force-kills Discord. Multiple installed/running channels may require an explicit approved executable in Settings.
 
-Tray-only clients, a close-to-tray setting, incomplete discovery, port conflicts and shutdown timeouts can stop the operation. A failure after shutdown may leave Discord stopped; cancellation after launch reports that launch occurred and asks you to check its process state. The shared restart flow and affirmative GUI path are mock-tested. **The user reports a successful manual Windows 11 test: Restart Discord reopened Discord, Connect succeeded and hello.js ran. This was not independently observed and does not validate the hosted binaries against real Discord. Automated live restart remains blocked in the development environment.** Do not use the application to circumvent an execution guard.
+Tray-only clients, a close-to-tray setting, incomplete discovery, port conflicts and shutdown timeouts can stop the operation. A failure after shutdown may leave Discord stopped; cancellation after launch reports that launch occurred and asks you to check its process state. The shared restart flow and affirmative GUI path are mock-tested. **The user reported a previous manual Windows 11 result; it was not independently observed and is not v1.0.0 validation or evidence for a public binary. Automated live restart remains unverified.** Do not use the application to circumvent an execution guard.
 
 ## External payloads
 
-Choose **Load Script**, select a trusted `.js` file, then choose **Run Script**. Edit that file and run again to evaluate its current contents. A harmless example is:
+Choose **Load Script**, select a trusted `.js` file, then choose **Run Script** and confirm that run. Edit that file and review/confirm again to evaluate its current contents. A harmless example is:
 
 ```javascript
 (() => {
@@ -74,7 +127,7 @@ Included hello.js returns a marker; banner.js displays a removable banner. Scrip
 | Endpoint unavailable | Check the configured port and authorized Discord debugging setup. |
 | Renderer not found | Confirm the endpoint belongs to a supported Discord page; lookalike titles/domains are rejected. |
 | Native controller could not start | Keep orb-cdp.exe in the extracted app folder. |
-| JavaScript exception | Read Logs, correct the external file, then run it again. |
+| JavaScript exception | Details are withheld for privacy; review the trusted external source locally. |
 | Port conflict | Choose a free local port; foreign or wildcard listeners cannot be reused for restart. |
 | Graceful exit timeout / no window | Quit Discord manually through its own controls where authorized, then retry an authorized setup. No force-kill fallback exists. |
 | Installation ambiguous | Select an approved installed Discord executable in Settings. |
@@ -89,6 +142,14 @@ Validated behavior includes harmless real renderer handshake/evaluation/exceptio
 
 ## Legacy and license
 
-The original author's script and documentation are preserved byte-for-byte with their original Git blobs in the repository's **legacy/** directory, with historical attribution **0x440_1me**. Text conversion is disabled for those two original files. They are reference artifacts, excluded from release payloads and never automatically executed. The legacy script contains unofficial Quest spoofing; its presence does not make it a supported app feature.
+The original script and historical readme remain byte-for-byte unchanged in
+the repository's **legacy/** directory, attributed to **0x440_1me**. The owner
+confirmed authorship and authorized bundling the unchanged script on
+2026-10-10. The portable package includes the script, `legacy/NOTICE.md` and
+`legacy/README.md`; it excludes the historical original readme. Tests only
+hash/copy the original; synthetic fixtures are the execution inputs.
 
-[LICENSE](LICENSE) grants MIT terms only for the new native application and supporting files, including the supplied reused C core. Original legacy files and material with unresolved upstream rights are explicitly excluded. See [CHANGELOG.md](CHANGELOG.md).
+[LICENSE](LICENSE) grants MIT terms only to the native/support files and
+explicitly excludes the original. [NOTICE](legacy/NOTICE.md) records the
+separate permission and its scope. Owner attestation does not establish all
+third-party rights; other distribution or relicensing needs verification.

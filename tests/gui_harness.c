@@ -19,7 +19,7 @@ static BOOL CALLBACK find_window(HWND window, LPARAM parameter) {
     if (!belongs(window, windows->pid) || !IsWindowVisible(window)) return TRUE;
     GetClassNameW(window, name, 128);
     if (!wcscmp(name, windows->mock ? L"24510_ORB_Mock_Window" : L"24510_ORB_Window")) windows->main = window;
-    if (!wcscmp(name, L"#32770") && (!windows->dialog_control || GetDlgItem(window, windows->dialog_control))) windows->dialog = window;
+    if (!wcscmp(name, L"#32770") && IsWindowEnabled(window) && (!windows->dialog_control || GetDlgItem(window, windows->dialog_control))) windows->dialog = window;
     return TRUE;
 }
 static BOOL CALLBACK control_inventory(HWND window, LPARAM unused) {
@@ -70,6 +70,19 @@ static BOOL wait_busy(Windows *windows, DWORD timeout) {
     do { if (IsWindowEnabled(GetDlgItem(windows->main, ID_STOP))) return TRUE; Sleep(10); } while (GetTickCount64() < end); return FALSE;
 }
 static HWND open_settings(Windows *windows) { if (!click(windows, windows->main, ID_SETTINGS)) return NULL; HWND dialog = wait_window(windows, TRUE, ID_PORT_EDIT, 3000); if (dialog) Sleep(150); return dialog; }
+static BOOL select_file(Windows *windows, HWND owner, int button, const wchar_t *path) {
+    if (!click(windows, owner, button)) return FALSE;
+    HWND dialog = NULL; ULONGLONG opened = GetTickCount64() + 3000;
+    do { dialog = wait_window(windows, TRUE, 0, 100); if (dialog && dialog != owner) break; Sleep(20); } while (GetTickCount64() < opened);
+    if (!dialog || dialog == owner) return FALSE;
+    Sleep(150); HWND edit = NULL; EnumChildWindows(dialog, find_file_edit, (LPARAM)&edit);
+    DWORD_PTR result = 0;
+    BOOL ok = edit && belongs(edit, windows->pid) && SendMessageTimeoutW(edit, WM_SETTEXT, 0, (LPARAM)path, SMTO_ABORTIFHUNG, 500, &result) && result;
+    if (ok) click(windows, dialog, IDOK); else click(windows, dialog, IDCANCEL);
+    ULONGLONG end = GetTickCount64() + 3000; while (IsWindow(dialog) && GetTickCount64() < end) Sleep(20);
+    if (IsWindow(dialog)) { click(windows, dialog, IDCANCEL); return FALSE; }
+    return ok;
+}
 static BOOL configure(Windows *windows, const wchar_t *port, const wchar_t *payload) {
     HWND dialog = open_settings(windows); if (!dialog) return FALSE;
     set_text(dialog, ID_PORT_EDIT, port); set_text(dialog, ID_OPERATION_EDIT, L"5000");
@@ -108,7 +121,39 @@ int wmain(int argc, wchar_t **argv) {
     check(contains(GetDlgItem(main, ID_STATUS), L"Discord (last check):"), "startup-process-snapshot-label");
     DWORD_PTR reply; check(SendMessageTimeoutW(main, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 200, &reply) != 0, "initial-responsiveness");
     const wchar_t *mode = argv[2], *port = argc > 3 ? argv[3] : L"9223", *payload = argc > 4 ? argv[4] : L"", *expected = argc > 5 ? argv[5] : L"JURI INJECTION SUCCESS"; BOOL captured = FALSE;
-    if (!wcscmp(mode, L"settings")) {
+    if (!wcscmp(mode,L"v1-visual-ready") || !wcscmp(mode,L"v1-visual-running") || !wcscmp(mode,L"v1-visual-completed")) {
+        unsigned index = !wcscmp(mode,L"v1-visual-ready") ? 1u : (!wcscmp(mode,L"v1-visual-running") ? 2u : 3u);
+        if (!windows.mock) check(FALSE,"v1-visual-requires-mock");
+        else {
+            DWORD_PTR injected_reply = 0;
+            BOOL injected = SendMessageTimeoutW(main, WM_APP+70, index, 0, SMTO_ABORTIFHUNG, 1500, &injected_reply) != 0 && injected_reply == 1;
+            check(injected,"v1-mock-state-injected");
+            HWND primary=GetDlgItem(main,ID_PRIMARY);
+            check(primary!=NULL && IsWindowVisible(primary) && IsWindowEnabled(primary),"v1-visual-primary-visible-enabled");
+            check(primary!=NULL && contains(primary,index==1?L"Start Orb":(index==2?L"Stop Orb":L"Retry")), index==1?"v1-visual-ready-primary-Start-Orb":(index==2?"v1-visual-running-primary-Stop-Orb":"v1-visual-completed-primary-Retry"));
+            if (index == 2) check(IsWindowVisible(GetDlgItem(main,ID_TABS)), "v1-visual-running-tabs-visible");
+            if (index == 3) check(!IsWindowVisible(GetDlgItem(main,ID_TABS)), "v1-visual-completed-tabs-hidden");
+        }
+    } else if (!wcscmp(mode,L"v1-startup-cancel")) {
+ HWND primary=GetDlgItem(main,ID_PRIMARY);
+ check(primary!=NULL && IsWindowVisible(primary) && IsWindowEnabled(primary),"v1-primary-visible-enabled");
+ check(primary!=NULL && contains(primary,L"Restart Discord to Connect"),"v1-disconnected-CTA-copy");
+ check(!IsWindowVisible(GetDlgItem(main,ID_CONNECT)),"v1-legacy-connect-hidden");
+ check(click(&windows,main,ID_PRIMARY),"v1-open-restart-confirmation");
+ HWND dialog=wait_window(&windows,TRUE,ID_CONFIRM_TEXT,3000);
+ check(dialog!=NULL,"v1-restart-dialog-visible");
+ if(dialog){
+  wchar_t title[128]={0};GetWindowTextW(dialog,title,128);
+  check(!wcscmp(title,L"Restart Discord to connect? (MOCK TEST)"),"v1-restart-dialog-title");
+  check(LOWORD(SendMessageW(dialog,DM_GETDEFID,0,0))==IDCANCEL,"v1-default-Cancel");
+  check(click(&windows,dialog,IDCANCEL),"v1-cancel-click");
+  Sleep(200);
+  check(!IsWindow(dialog),"v1-cancel-closed");
+ }
+ check(contains(GetDlgItem(main,ID_LOG_EDIT),L"Restart cancelled; Discord untouched."),"v1-cancel-no-worker-log");
+ check(primary!=NULL && IsWindowEnabled(primary) && contains(primary,L"Restart Discord to Connect"),"v1-cancel-keeps-disconnected");
+ DWORD_PTR pong=0;check(SendMessageTimeoutW(main,WM_NULL,0,0,SMTO_ABORTIFHUNG,200,&pong)!=0,"v1-responsive-after-cancel");
+} else if (!wcscmp(mode, L"settings")) {
         HWND dialog = open_settings(&windows); check(dialog != NULL, "settings-open");
         if (dialog) {
             if (argc > 6) { set_text(dialog, ID_SCRIPT_EDIT, L"hello.js"); captured = TRUE; check(capture(dialog, argv[6]), "own-settings-only-capture"); }
@@ -120,6 +165,56 @@ int wmain(int argc, wchar_t **argv) {
             set_text(dialog, ID_PORT_EDIT, port); set_text(dialog, ID_OPERATION_EDIT, L"499"); click(&windows, dialog, IDOK); Sleep(100); check(contains(GetDlgItem(dialog, ID_SETTINGS_ERROR), L"Operation timeout"), "reject-short-timeout");
             set_text(dialog, ID_OPERATION_EDIT, L"5000"); set_text(dialog, ID_DISCORD_EDIT, argv[1]); click(&windows, dialog, IDOK); Sleep(100); check(contains(GetDlgItem(dialog, ID_SETTINGS_ERROR), L"approved installed image"), "reject-unrelated-executable"); click(&windows, dialog, IDCANCEL);
         }
+    } else if (!wcsncmp(mode, L"orb-", 4)) {
+        check(configure(&windows, port, payload), "synthetic-settings");
+        check(click(&windows, main, ID_ORIGINAL), "discoverable-original-button");
+        HWND review = wait_window(&windows, TRUE, ID_ORB_SOURCE, 3000);
+        check(review != NULL, "native-original-review-open");
+        if (review) {
+            check(select_file(&windows, review, ID_ORB_SELECT, payload), "import-local-synthetic-script");
+            check(contains(GetDlgItem(review, ID_ORB_SOURCE), L"JURI INJECTION SUCCESS"), "read-only-source-review");
+            check(contains(GetDlgItem(review, ID_ORB_INFO), L"SHA-256"), "review-hash-visible");
+            check(!IsWindowEnabled(GetDlgItem(main, ID_STOP)), "import-does-not-run");
+            click(&windows, review, IDOK);
+            HWND consent = wait_window(&windows, TRUE, ID_CONFIRM_TEXT, 3000);
+            check(consent != NULL, "original-per-run-confirmation");
+            if (consent) {
+                check(LOWORD(SendMessageW(consent, DM_GETDEFID, 0, 0)) == IDCANCEL, "original-default-cancel");
+                check(contains(GetDlgItem(consent, ID_CONFIRM_TEXT), L"automatically enrolls/updates quests") && contains(GetDlgItem(consent, ID_CONFIRM_TEXT), L"fakes activity"), "accurate-original-warning");
+                if (!wcscmp(mode, L"orb-run") && windows.mock) {
+                    click(&windows, consent, IDOK); check(wait_busy(&windows, 1000), "original-dispatch-worker");
+                    check(wait_idle(&windows, 7000), "original-dispatch-complete");
+                    check(contains(GetDlgItem(main, ID_LOG_EDIT), L"renderer state unknown"), "original-unknown-state");
+                    click(&windows, main, ID_RUN); Sleep(150);
+                    check(contains(GetDlgItem(main, ID_LOG_EDIT), L"Start refused"), "duplicate-start-blocked");
+                    check(!IsWindowEnabled(GetDlgItem(main, ID_STOP)), "duplicate-no-worker");
+                } else {
+                    if (!wcscmp(mode, L"orb-escape")) { PostMessageW(consent, WM_KEYDOWN, VK_ESCAPE, 0); PostMessageW(consent, WM_KEYUP, VK_ESCAPE, 0); }
+                    else if (!wcscmp(mode, L"orb-x")) PostMessageW(consent, WM_CLOSE, 0, 0);
+                    else click(&windows, consent, IDCANCEL);
+                    Sleep(150); check(!IsWindow(consent), "original-consent-cancelled");
+                    check(IsWindow(review) && !IsWindowEnabled(GetDlgItem(main, ID_STOP)), "original-cancel-no-worker");
+                    click(&windows, review, IDCANCEL); Sleep(150);
+                }
+            }
+        }
+    } else if (!wcsncmp(mode, L"run-cancel", 10)) {
+        check(configure(&windows, port, payload), "synthetic-settings"); click(&windows, main, ID_RUN);
+        HWND consent = wait_window(&windows, TRUE, ID_CONFIRM_TEXT, 3000);
+        check(consent != NULL, "normal-run-confirmation");
+        if (consent) {
+            check(LOWORD(SendMessageW(consent, DM_GETDEFID, 0, 0)) == IDCANCEL, "normal-run-default-cancel");
+            click(&windows, consent, IDCANCEL); Sleep(150);
+            check(!IsWindowEnabled(GetDlgItem(main, ID_STOP)) && contains(GetDlgItem(main, ID_LOG_EDIT), L"nothing sent"), "normal-cancel-no-worker");
+        }
+    } else if (!wcscmp(mode, L"load-cancel")) {
+        click(&windows, main, ID_LOAD); HWND dialog = wait_window(&windows, TRUE, 0, 3000);
+        check(dialog != NULL, "normal-picker-open"); if (dialog) click(&windows, dialog, IDCANCEL); Sleep(150);
+        check(!IsWindowEnabled(GetDlgItem(main, ID_STOP)), "picker-cancel-no-worker");
+    } else if (!wcscmp(mode, L"request-stop")) {
+        check(configure(&windows, port, payload), "synthetic-settings"); click(&windows, main, ID_ORB_STOP);
+        check(wait_busy(&windows, 1000), "renderer-stop-worker"); check(wait_idle(&windows, 7000), "renderer-stop-complete");
+        check(contains(GetDlgItem(main, ID_LOG_EDIT), L"Stop requested / state unknown"), "renderer-stop-honest-state");
     } else if (!wcscmp(mode, L"fallback")) {
         check(contains(GetDlgItem(main, ID_STATUS), L"Port: 9223") && contains(GetDlgItem(main, ID_PAYLOAD), L"hello.js"), "corrupt-preferences-default-fallback");
     } else if (!wcscmp(mode, L"persist")) {
@@ -153,11 +248,11 @@ int wmain(int argc, wchar_t **argv) {
         check(last.right <= client.right && last.bottom <= client.bottom, "minimum-controls-visible");
     } else if (!wcscmp(mode, L"dpi")) {
         MINMAXINFO before = {0}, after = {0}; SendMessageW(main, WM_GETMINMAXINFO, 0, (LPARAM)&before); RECT rectangle; GetWindowRect(main, &rectangle); rectangle.right = rectangle.left + 1350; rectangle.bottom = rectangle.top + 1000;
-        check(SendMessageTimeoutW(main, WM_DPICHANGED, MAKEWPARAM(144, 144), (LPARAM)&rectangle, SMTO_ABORTIFHUNG, 500, &reply) != 0, "owned-window-DPI-message");
+        check(SendMessageTimeoutW(main, WM_DPICHANGED, MAKEWPARAM(144, 144), (LPARAM)&rectangle, SMTO_ABORTIFHUNG, 2000, &reply) != 0, "owned-window-DPI-message");
         SendMessageW(main, WM_GETMINMAXINFO, 0, (LPARAM)&after);
         printf("DPI_MIN_BEFORE=%ld,%ld AFTER=%ld,%ld\n", before.ptMinTrackSize.x,before.ptMinTrackSize.y,after.ptMinTrackSize.x,after.ptMinTrackSize.y);
         check(after.ptMinTrackSize.x == 1275 && after.ptMinTrackSize.y == 930 && after.ptMinTrackSize.x >= before.ptMinTrackSize.x, "DPI-scaled-minimum");
-        RECT button; GetWindowRect(GetDlgItem(main, ID_CONNECT), &button); check(button.bottom - button.top == 57, "DPI-scaled-control-height");
+        RECT button; HWND primary = GetDlgItem(main, ID_PRIMARY); BOOL measured = primary && GetWindowRect(primary, &button); check(measured && IsWindowVisible(primary) && button.bottom - button.top == 93, "DPI-scaled-primary-CTA-height");
     } else if (wcscmp(mode, L"smoke")) {
         check(configure(&windows, port, !wcscmp(mode, L"load") ? L"" : payload), "valid-settings-saved");
         if (!wcscmp(mode, L"load")) {
@@ -170,7 +265,13 @@ int wmain(int argc, wchar_t **argv) {
                 click(&windows, dialog, IDOK); ULONGLONG end = GetTickCount64() + 3000; while (IsWindow(dialog) && GetTickCount64() < end) Sleep(20); check(!IsWindow(dialog), "Unicode-file-selected"); if (IsWindow(dialog)) { EnumChildWindows(dialog,control_inventory,0); click(&windows, dialog, IDCANCEL); }
             }
         }
-        click(&windows, main, !wcscmp(mode, L"connect") ? ID_CONNECT : ID_RUN); check(wait_busy(&windows, 1000), "worker-dispatched");
+        click(&windows, main, !wcscmp(mode, L"connect") ? ID_CONNECT : ID_RUN);
+        if (wcscmp(mode, L"connect")) {
+            HWND consent = wait_window(&windows, TRUE, ID_CONFIRM_TEXT, 3000);
+            check(consent != NULL, "per-run-consent-visible");
+            if (consent) { check(contains(GetDlgItem(consent, ID_CONFIRM_TEXT), L"SHA-256"), "consent-byte-hash-visible"); click(&windows, consent, IDOK); }
+        }
+        check(wait_busy(&windows, 1000), "worker-dispatched");
         if (!wcscmp(mode, L"stop") || !wcscmp(mode, L"close")) {
             Sleep(500); check(SendMessageTimeoutW(main, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 200, &reply) != 0, "responsive-during-stalled-CDP");
             check(!IsWindowEnabled(GetDlgItem(main, ID_RESTART)) && !IsWindowEnabled(GetDlgItem(main, ID_SETTINGS)), "conflicting-controls-disabled"); ULONGLONG start = GetTickCount64();
@@ -180,7 +281,7 @@ int wmain(int argc, wchar_t **argv) {
         } else {
             check(wait_idle(&windows, 10000), "worker-completed"); check(contains(GetDlgItem(main, ID_LOG_EDIT), expected), "expected-result-in-log");
             if (!wcscmp(mode,L"repeat")) {
-                for (unsigned i = 0; i < 2; ++i) { click(&windows,main,ID_RUN); check(wait_busy(&windows,1000),"same-window-repeat-dispatched"); check(wait_idle(&windows,10000),"same-window-repeat-completed"); }
+                for (unsigned i = 0; i < 2; ++i) { click(&windows,main,ID_RUN); HWND consent = wait_window(&windows, TRUE, ID_CONFIRM_TEXT, 3000); if (consent) click(&windows,consent,IDOK); check(wait_busy(&windows,1000),"same-window-repeat-dispatched"); check(wait_idle(&windows,10000),"same-window-repeat-completed"); }
                 wchar_t logs[25000]; text(GetDlgItem(main,ID_LOG_EDIT),logs,25000); unsigned count = 0; const wchar_t *match = logs;
                 while ((match = wcsstr(match,expected)) != NULL) { ++count; match += wcslen(expected); }
                 check(count >= 3,"three-results-in-same-window-log");

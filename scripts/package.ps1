@@ -38,19 +38,27 @@ try {
     $builtPackages=[IO.File]::ReadAllLines((Join-Path $build 'compiler-packages.txt'))
     if($builtCompiler -ne $compiler -or $builtBinutils -ne $binutils -or (($builtPackages -join "`n") -ne ($packages -join "`n"))){throw 'Packaging toolchain differs from recorded build toolchain.'}
     $outputFull=[IO.Path]::GetFullPath($OutputDirectory)
-    if($outputFull.TrimEnd('\') -eq $root.TrimEnd('\') -or $outputFull.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Package output must be outside the source checkout.'}
+    if(-not($Development -and $outputFull.StartsWith((Join-Path $root 'bin\review-packages')+'\',[StringComparison]::OrdinalIgnoreCase)) -and ($outputFull.TrimEnd('\') -eq $root.TrimEnd('\') -or $outputFull.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase))){throw 'Package output must be outside the source checkout, or under bin/review-packages for Development.'}
     $null=New-Item -ItemType Directory -Force -Path $OutputDirectory
     $output=(Resolve-Path -LiteralPath $OutputDirectory).Path
     $files=[ordered]@{
         '24510_0rb.exe'=(Join-Path $build '24510_0rb.exe'); 'orb-cdp.exe'=(Join-Path $build 'orb-cdp.exe')
         'payloads/hello.js'=(Join-Path $root 'payloads\hello.js'); 'payloads/banner.js'=(Join-Path $root 'payloads\banner.js')
+        'legacy/dc_cmd_script.js'=(Join-Path $root 'legacy\dc_cmd_script.js'); 'legacy/NOTICE.md'=(Join-Path $root 'legacy\NOTICE.md'); 'legacy/README.md'=(Join-Path $root 'legacy\README.md')
         'README.md'=(Join-Path $root 'README.md'); 'LICENSE'=(Join-Path $root 'LICENSE')
         'BUILDING.md'=(Join-Path $root 'BUILDING.md'); 'SECURITY.md'=(Join-Path $root 'SECURITY.md')
         'CHANGELOG.md'=(Join-Path $root 'CHANGELOG.md'); 'VERSION'=(Join-Path $root 'VERSION')
         'docs/architecture.md'=(Join-Path $root 'docs\architecture.md'); 'docs/test-results.md'=(Join-Path $root 'docs\test-results.md')
         'docs/images/app.png'=(Join-Path $root 'docs\images\app.png'); 'docs/images/restart.png'=(Join-Path $root 'docs\images\restart.png')
+        'docs/images/v1-ready.png'=(Join-Path $root 'docs\images\v1-ready.png')
+        'docs/images/v1-running.png'=(Join-Path $root 'docs\images\v1-running.png')
+        'docs/images/v1-completed.png'=(Join-Path $root 'docs\images\v1-completed.png')
     }
     foreach($path in $files.Values){if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw 'A whitelisted asset is missing.'}}
+    $originalHash='ef4b9fd9146ddc4da80b4037158d12e12641d91e6aee4babfa9b976ef96205b5'
+    if((Get-FileHash -LiteralPath $files['legacy/dc_cmd_script.js'] -Algorithm SHA256).Hash.ToLowerInvariant() -cne $originalHash){throw 'Original Orb bytes differ; packaging refused.'}
+    $notice=[IO.File]::ReadAllText($files['legacy/NOTICE.md'])
+    if(!$notice.Contains($originalHash) -or !$notice.Contains('0x440_1me') -or !$notice.Contains('MIT license does not cover') -or !$notice.Contains('2026-10-10')){throw 'Original Orb notice incomplete.'}
     $public=@(& git -c core.quotepath=false ls-files --cached --others --exclude-standard); if($LASTEXITCODE){throw 'Cannot inventory source files.'}
     $public=$public | Select-Object -Unique
     $sourceNames=[string[]]$public; [Array]::Sort($sourceNames,[StringComparer]::Ordinal)
@@ -72,6 +80,7 @@ try {
         source_snapshot_sha256=$snapshotHash; compiler=$compiler; compiler_target=$target; binutils=$binutils
         msys2_packages=$packages; powershell=$PSVersionTable.PSVersion.ToString(); dotnet=[Environment]::Version.ToString()
         compile_flags='C11 -Wall -Wextra -Wpedantic -Werror -O2; source-prefix-map; zero-PE-timestamp'
+        original_orb=[ordered]@{path='legacy/dc_cmd_script.js';sha256=$originalHash;author='0x440_1me';notice='legacy/NOTICE.md';mit_covered=$false;bundling_permission='owner attestation 2026-10-10, issue #4'}
         zip_timestamp='2000-01-01T00:00:00Z'; files=$assetHashes
     }
     $manifestBytes=[Text.UTF8Encoding]::new($false).GetBytes(($manifest|ConvertTo-Json -Depth 8).Replace("`r`n","`n")+"`n")

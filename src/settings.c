@@ -23,7 +23,7 @@ BOOL settings_valid_number(const wchar_t *text, DWORD minimum, DWORD maximum, DW
 void settings_defaults(AppSettings *settings, const wchar_t *directory) {
     memset(settings, 0, sizeof(*settings)); settings->port = 9223;
     settings->operation_timeout_ms = 15000; settings->exit_timeout_ms = 10000; settings->endpoint_timeout_ms = 20000;
-    swprintf(settings->payload_path, DISCORD_PATH_CAP, L"%ls\\payloads\\hello.js", directory);
+    swprintf(settings->payload_path, DISCORD_PATH_CAP, L"%ls\\payloads\\original-orb.js", directory);
 }
 BOOL settings_load(AppSettings *settings, const wchar_t *directory) {
     settings_defaults(settings, directory); wchar_t file[DISCORD_PATH_CAP], text[64]; DWORD n;
@@ -42,6 +42,8 @@ BOOL settings_load(AppSettings *settings, const wchar_t *directory) {
     wchar_t default_payload[DISCORD_PATH_CAP]; wcscpy(default_payload, settings->payload_path);
     GetPrivateProfileStringW(L"app", L"payload", default_payload, settings->payload_path, DISCORD_PATH_CAP, file);
     GetPrivateProfileStringW(L"app", L"discord_executable", L"", settings->discord_executable, DISCORD_PATH_CAP, file);
+    settings->passive_connect_on_start=GetPrivateProfileIntW(L"app",L"passive_connect_on_start",0,file)==1;
+    settings->quest_status_opt_in=GetPrivateProfileIntW(L"app",L"quest_status_opt_in",0,file)==1;
     return TRUE;
 }
 BOOL settings_save(const AppSettings *settings) {
@@ -61,6 +63,7 @@ BOOL settings_save(const AppSettings *settings) {
     DWORD values[] = {settings->port, settings->operation_timeout_ms, settings->exit_timeout_ms, settings->endpoint_timeout_ms};
     for (unsigned i = 0; i < 4; ++i) { swprintf(text, 64, L"%lu", values[i]); if (!WritePrivateProfileStringW(L"app", keys[i], text, temporary)) ok = FALSE; }
     ok = ok && WritePrivateProfileStringW(L"app", L"payload", settings->payload_path, temporary) && WritePrivateProfileStringW(L"app", L"discord_executable", settings->discord_executable, temporary);
+    ok=ok&&WritePrivateProfileStringW(L"app",L"passive_connect_on_start",settings->passive_connect_on_start?L"1":L"0",temporary)&&WritePrivateProfileStringW(L"app",L"quest_status_opt_in",settings->quest_status_opt_in?L"1":L"0",temporary);
     WritePrivateProfileStringW(NULL, NULL, NULL, temporary);
     if (ok) ok = MoveFileExW(temporary, file, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
     if (!ok) DeleteFileW(temporary);

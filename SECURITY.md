@@ -12,3 +12,20 @@
 Preferences are saved under Local AppData and may contain your selected file paths. Logs may contain script results or errors. Do not publish private logs/preferences, tokens, account contents or private channel URLs. Public tests use controlled harmless fixtures; screenshots show only the app/dialog.
 
 Report a security concern through the repository's GitHub security reporting feature if available. Otherwise open an issue with a minimal sanitized description and no credentials/private Discord data. There is no promised response SLA. Never circumvent a denied execution path while reproducing a report.
+
+## Unreleased v0.3 privacy and experimental payload
+
+Routine diagnostics withhold arbitrary renderer results/errors/events, titles,
+URLs and raw /json/version, even with --verbose. The production helper
+validates selected installed Discord process/listener ownership before HTTP,
+WebSocket connection and dispatch. This is a best-effort process policy, not
+a code-signing check or atomic socket ownership proof. Fixture-only helpers
+are separate binaries and never packaged; they reject the preserved original.
+
+Original Orb requires byte-locked review and per-run hash-bound consent. Its
+self-starting Quest enrollment/activity spoofing uses the authenticated client
+and may violate Discord rules. Stop is cooperative and cannot prove cleanup
+or completion; cancelling the helper is not renderer cancellation. The GUI
+blocks repeat starts in the current session after an experimental dispatch.
+Closing/reopening the app does not prove the renderer has stopped. The bundled
+original is excluded from MIT; see legacy/NOTICE.md for owner permission.

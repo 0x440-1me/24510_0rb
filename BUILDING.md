@@ -69,3 +69,21 @@ Successful jobs package clean source outside the checkout, verify every asset, i
 Those runs recorded GCC 16.2.0 Rev5 (package 16.2.0-5), binutils 2.47-4, UCRT headers/CRT 14.0.0.r426.g4564ee4b5-1, PowerShell 7.6.6 and .NET 10.0.12. The PR package records its synthetic merge checkout SHA; the push package records the feature SHA. Equal source content and toolchain produced equal executable hashes, while the ZIP hashes differ because their source-revision metadata differs. Prior Windows 11 live checks used a local Rev4 compiler build. No binary identity across different hosts/toolchains, or real-CDP test of the hosted binaries, is claimed. See [test results](docs/test-results.md); actual versions are always recorded in each manifest.
 
 Tag release accepts only an exact vMAJOR.MINOR.PATCH matching VERSION and the checked-out event SHA; that commit must belong to current origin/main history. A separate contents:write job downloads the verified two-file artifact with digest mismatch treated as an error, repeats checksum/provenance checks and creates a new release with controlled notes. Existing releases/tags/assets are never overwritten. After publication, download the public ZIP/checksum and verify its checksum, manifest source SHA and assets independently. Build-artifact verification does not establish that this publication/download procedure completed. Consult [current Actions](https://github.com/0x440-1me/24510_0rb/actions), [releases](https://github.com/0x440-1me/24510_0rb/releases) and [Issue #2](https://github.com/0x440-1me/24510_0rb/issues/2) for the corresponding run and verification records.
+
+## Unreleased v0.3 additions
+
+The build creates bin/mock/orb-cdp.exe and bin/mock/24510_0rb-ui-mock.exe
+for account-free tests, separately from production images. The original
+script is copied unchanged into bin/legacy with its permission/risk notice.
+Only the production executables and allowlisted payload/notices are packaged.
+
+Run bin/payload-test.exe, tests/v03.ps1, tests/foundation.ps1 and tests/gui.ps1
+in an already permitted PowerShell environment. Fixtures support Windows
+PowerShell 5.1 and PowerShell 7 using explicit synthetic WebSocket frames.
+Never supply the original as an execution test input.
+
+For private dirty-source review, package.ps1 -Development may write under
+bin/review-packages/<new-directory>. verify-package.ps1 -AllowDevelopment
+checks the same archive hashes/notices while accepting its explicit dirty
+source/development flags. Default verification still requires clean-source
+release provenance. VERSION remains 0.2.0; such a ZIP is not a v0.3 release.

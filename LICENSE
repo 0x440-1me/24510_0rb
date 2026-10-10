@@ -8,6 +8,12 @@ tests/, payloads/, docs/, README.md, BUILDING.md, SECURITY.md, CHANGELOG.md,
 VERSION, .gitignore, .gitattributes, legacy/README.md and subsequently authored
 native CI workflows.
 
+The unchanged original script is included in the unreleased v0.3 Windows
+package with the repository owner's explicit 2026-10-10 bundling permission.
+This is a separate permission, not a grant of MIT terms for that file; see
+legacy/NOTICE.md. Owner attestation is not an independent third-party rights
+audit. Original attribution and notices are retained.
+
 EXCLUDED: legacy/dc_cmd_script.js, legacy/original-readme.md and any pre-existing
 or third-party material whose upstream rights have not been confirmed. Moving
 or documenting those files does not grant new rights. Existing notices and

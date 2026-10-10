@@ -57,3 +57,15 @@ The purpose-built harness scopes every window/control interaction to its freshly
 ## Component tests
 
 `scripts/test.bat` builds the native components and runs isolated PowerShell fixtures. Tests require an approved PowerShell environment whose existing policy permits the local test scripts. The script never changes execution policy or adds a policy bypass. A policy refusal must be reported separately from component test results; do not work around it through another VM launch path.
+
+## Unreleased v0.3 boundary
+
+Experimental import/review holds a FILE_SHARE_READ handle through the per-run
+confirmation and worker lifetime. The helper hashes the exact UTF-8 buffer
+that becomes Runtime.evaluate.expression. Dispatch uses awaitPromise=false
+and returnByValue=false; it reports renderer state unknown. Stop is a
+separate bounded Runtime.evaluate invoking the existing stopQuestProgram
+hook if present. It never equates helper completion/cancellation with
+renderer cleanup. All arbitrary response fields remain out of routine logs.
+Production helper ownership checks reuse the installed Discord policy before
+network requests and before dispatch; mocks compile separately.

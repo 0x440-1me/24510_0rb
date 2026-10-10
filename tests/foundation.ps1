@@ -2,9 +2,11 @@ param([Parameter(Mandatory=$true)][string]$EvidenceDirectory, [int]$Port=19234)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $bin=Join-Path $root 'bin'
-$helper=Join-Path $bin 'orb-cdp.exe'
+$testBin=Join-Path $bin 'mock'
+$helper=Join-Path $testBin 'orb-cdp.exe'
 $driver=Join-Path $bin 'controller-test.exe'
 New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
+$EvidenceDirectory=(Resolve-Path -LiteralPath $EvidenceDirectory).Path
 $summary=@()
 $discordBefore=@(Get-Process Discord -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id | Sort-Object)
 $cases=@(
@@ -47,6 +49,7 @@ foreach($case in $cases) {
         if($case.Name -eq 'managed-cancel') {
             $sentinel=Start-Process -FilePath $driver -ArgumentList '--sentinel' -WindowStyle Hidden -PassThru
         }
+        $ErrorActionPreference='Continue' # Windows PowerShell treats native stderr as an ErrorRecord.
         switch($case.Action) {
             'check' { & $helper --check --port $Port *> $clientLog }
             'list' { & $helper --list-targets --port $Port *> $clientLog }
@@ -54,12 +57,12 @@ foreach($case in $cases) {
             'eval' { & $helper --file (Join-Path $root 'payloads\hello.js') --verbose --port $Port *> $clientLog }
             'managed' {
                 $timeout=if($case.Timeout){$case.Timeout}else{10000}
-                $argv=@($bin,[string]$Port,[string]$timeout,'eval',(Join-Path $root 'payloads\hello.js'))
+                $argv=@($testBin,[string]$Port,[string]$timeout,'eval',(Join-Path $root 'payloads\hello.js'))
                 if($case.Cancel){$argv += [string]$case.Cancel}
                 & $driver @argv *> $clientLog
             }
         }
-        $code=$LASTEXITCODE; $started.Stop()
+        $code=$LASTEXITCODE; $ErrorActionPreference='Stop'; $started.Stop()
         $unexpectedConnection=$tripwire.Pending()
         if($case.Mode -eq 'stall') { Stop-Job $job } else { $null=Wait-Job $job -Timeout 10 }
         $serverLog=Join-Path $EvidenceDirectory ($case.Name+'-server.log')
@@ -70,7 +73,7 @@ foreach($case in $cases) {
         $passed=$code -eq $case.Expected -and !$unexpectedConnection -and $noOrphan
         $unrelatedSurvived=(!$sentinel -or !$sentinel.HasExited)
         $passed=$passed -and $unrelatedSurvived
-        if($case.Name -eq 'managed-output-cap'){ $passed=$passed -and $content.Contains('bytes=65535 truncated=1') }
+        if($case.Name -eq 'managed-output-cap'){ $passed=$passed -and $content.Contains('truncated=0') -and !$content.Contains(('X' * 80)) }
         if($scenario -in @('missing-result','empty-result','missing-type','invalid-type','command-error')) {
             $passed=$passed -and !$content.Contains('No matching CDP response')
         }
@@ -86,8 +89,8 @@ foreach($case in $cases) {
 }
 foreach($case in @(
     @{Name='managed-launch-error';Directory=(Join-Path $EvidenceDirectory 'absent');Payload=(Join-Path $root 'payloads\hello.js');Expected=13},
-    @{Name='managed-missing-file';Directory=$bin;Payload=(Join-Path $EvidenceDirectory 'absent.js');Expected=6},
-    @{Name='managed-invalid-filename';Directory=$bin;Payload='invalid|filename.js';Expected=6}
+    @{Name='managed-missing-file';Directory=$testBin;Payload=(Join-Path $EvidenceDirectory 'absent.js');Expected=6},
+    @{Name='managed-invalid-filename';Directory=$testBin;Payload='invalid|filename.js';Expected=6}
 )) {
     & $driver $case.Directory $Port 2000 eval $case.Payload *> (Join-Path $EvidenceDirectory ($case.Name+'-client.log'))
     $code=$LASTEXITCODE
@@ -96,8 +99,8 @@ foreach($case in @(
 $discordAfter=@(Get-Process Discord -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id | Sort-Object)
 $sameDiscord=($discordBefore -join ',') -eq ($discordAfter -join ',')
 $summary += [pscustomobject]@{Name='discord-processes-untouched';Passed=$sameDiscord;BeforeCount=$discordBefore.Count;AfterCount=$discordAfter.Count}
-foreach($directory in @($bin,(Join-Path $EvidenceDirectory 'absent'))) {
-    $name=if($directory -eq $bin){'managed-handles-normal-exit'}else{'managed-handles-launch-failure'}
+foreach($directory in @($testBin,(Join-Path $EvidenceDirectory 'absent'))) {
+    $name=if($directory -eq $testBin){'managed-handles-normal-exit'}else{'managed-handles-launch-failure'}
     & $driver --handles $directory *> (Join-Path $EvidenceDirectory ($name+'.log'))
     $summary += [pscustomobject]@{Name=$name;Passed=($LASTEXITCODE -eq 0)}
 }

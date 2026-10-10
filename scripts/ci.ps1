@@ -28,10 +28,18 @@ try {
     }
     & cmd.exe /d /c scripts\build.bat *> (Join-Path $EvidenceDirectory 'build.log')
     if($LASTEXITCODE){throw 'Native build failed; see build.log.'}
+    & .\scripts\verify-ribbon.ps1 *> (Join-Path $EvidenceDirectory 'ribbon.log')
+    if($LASTEXITCODE){throw 'Ribbon resource verification failed; see ribbon.log.'}
     & .\bin\process-test.exe *> (Join-Path $EvidenceDirectory 'process.log')
     if($LASTEXITCODE){throw 'Native mocked process tests failed.'}
+    & .\bin\payload-test.exe *> (Join-Path $EvidenceDirectory 'payload.log')
+    if($LASTEXITCODE){throw 'Payload consent unit tests failed.'}
+    & .\bin\orb-state-test.exe *> (Join-Path $EvidenceDirectory 'orb-state.log')
+    if($LASTEXITCODE){throw 'V1 state-machine unit tests failed.'}
+    & .\tests\v03.ps1 -EvidenceDirectory (Join-Path $EvidenceDirectory 'v03') *> (Join-Path $EvidenceDirectory 'v03.log')
     & .\tests\foundation.ps1 -EvidenceDirectory (Join-Path $EvidenceDirectory 'foundation') *> (Join-Path $EvidenceDirectory 'foundation.log')
-    & .\tests\gui.ps1 -EvidenceDirectory (Join-Path $EvidenceDirectory 'gui') *> (Join-Path $EvidenceDirectory 'gui.log')
+    & .\tests\gui-v1-basic.ps1 -EvidenceDirectory (Join-Path $EvidenceDirectory 'gui-v1') *> (Join-Path $EvidenceDirectory 'gui-v1.log')
+    if($LASTEXITCODE){throw 'V1 mock GUI suite failed; see gui-v1.log.'}
     $gcc=Join-Path $env:MSYS2_LOCATION 'ucrt64\bin\gcc.exe'
     if($env:ORB_GCC){$gcc=$env:ORB_GCC}
     $objdump=Join-Path (Split-Path $gcc -Parent) 'objdump.exe'
@@ -40,7 +48,7 @@ try {
         $dump=@(& $objdump -p (Join-Path $root "bin\$image"));if($LASTEXITCODE){throw 'Cannot inspect production imports.'}
         $dump|Set-Content (Join-Path $EvidenceDirectory ($image+'-imports.txt'))
         $dlls=@($dump|Select-String 'DLL Name:\s*(\S+)'|ForEach-Object{$_.Matches[0].Groups[1].Value})
-        if(-not $dlls.Count -or @($dlls|Where-Object{$_ -notmatch '^(?i:COMCTL32|comdlg32|GDI32|IPHLPAPI|KERNEL32|SHELL32|USER32|WS2_32|WINHTTP)\.dll$|^api-ms-win-crt-[a-z0-9-]+\.dll$'}).Count){throw 'Unexpected production runtime dependency.'}
+        if(-not $dlls.Count -or @($dlls|Where-Object{$_ -notmatch '^(?i:bcrypt|COMCTL32|comdlg32|GDI32|IPHLPAPI|KERNEL32|SHELL32|USER32|WS2_32|WINHTTP)\.dll$|^api-ms-win-crt-[a-z0-9-]+\.dll$'}).Count){throw 'Unexpected production runtime dependency.'}
         $imports+=[pscustomobject]@{image=$image;imports=$dlls;passed=$true}
     }
     $imports|ConvertTo-Json -Depth 4|Set-Content (Join-Path $EvidenceDirectory 'imports.json')

@@ -35,6 +35,9 @@ if errorlevel 1 (
   echo ERROR: The compiler headers must target UCRT.
   exit /b 1
 )
+for %%D in ("%GCC%") do set "WINDRES=%%~dpDwindres.exe"
+"%WINDRES%" -I src src\helper.rc -O coff -o "%OUT_DIR%\helper-resource.o"
+if errorlevel 1 exit /b 1
 set "FLAGS=-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -D_WIN32_WINNT=0x0602 -Wl,--no-insert-timestamp"
 "%GCC%" --version
 "%GCC%" --version > "%OUT_DIR%\compiler-version.txt"
@@ -46,11 +49,18 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 git rev-parse HEAD > "%OUT_DIR%\build-source-revision.txt"
 if errorlevel 1 exit /b 1
-"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode src\helper.c -o "%OUT_DIR%\orb-cdp.exe" -lwinhttp
+"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode src\helper.c src\discord_process.c src\cdp.c src\orb_state.c "%OUT_DIR%\helper-resource.o" -o "%OUT_DIR%\orb-cdp.exe" -lwinhttp -lbcrypt -luser32 -lshell32 -liphlpapi -lws2_32
 if errorlevel 1 exit /b 1
 "%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode tests\controller_driver.c src\cdp.c -o "%OUT_DIR%\controller-test.exe"
 if errorlevel 1 exit /b 1
-echo Native helper and controller test driver built.
+if not exist "%OUT_DIR%\mock" mkdir "%OUT_DIR%\mock"
+"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -DORB_CDP_TEST_MOCK -municode src\helper.c src\orb_state.c "%OUT_DIR%\helper-resource.o" -o "%OUT_DIR%\mock\orb-cdp.exe" -lwinhttp -lbcrypt
+if errorlevel 1 exit /b 1
+"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode tests\payload_test.c -o "%OUT_DIR%\payload-test.exe" -lbcrypt
+if errorlevel 1 exit /b 1
+"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." tests\orb_state_test.c src\orb_state.c -o "%OUT_DIR%\orb-state-test.exe"
+if errorlevel 1 exit /b 1
+echo Native helper, separate fixture helper, payload/state tests and controller driver built.
 "%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode tests\discord_process_test.c src\discord_process.c src\cdp.c -o "%OUT_DIR%\process-test.exe" -luser32 -lshell32 -liphlpapi -lws2_32
 if errorlevel 1 exit /b 1
 echo Native Discord process test driver built.
@@ -59,9 +69,9 @@ if errorlevel 1 exit /b 1
 for %%D in ("%GCC%") do set "WINDRES=%%~dpDwindres.exe"
 "%WINDRES%" -I src src\gui.rc -O coff -o "%OUT_DIR%\gui-resource.o"
 if errorlevel 1 exit /b 1
-"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode -mwindows src\main.c src\gui.c src\settings.c src\discord_process.c src\cdp.c "%OUT_DIR%\gui-resource.o" -o "%OUT_DIR%\24510_0rb.exe" -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 -liphlpapi -lws2_32
+"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode -mwindows src\main.c src\gui.c src\settings.c src\discord_process.c src\cdp.c src\orb_state.c "%OUT_DIR%\gui-resource.o" -o "%OUT_DIR%\24510_0rb.exe" -lbcrypt -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 -liphlpapi -lws2_32
 if errorlevel 1 exit /b 1
-"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -DORB_UI_TEST_MOCK -municode -mwindows src\main.c src\gui.c src\settings.c src\discord_process.c src\cdp.c "%OUT_DIR%\gui-resource.o" -o "%OUT_DIR%\24510_0rb-ui-mock.exe" -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 -liphlpapi -lws2_32
+"%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -DORB_UI_TEST_MOCK -municode -mwindows src\main.c src\gui.c src\settings.c src\discord_process.c src\cdp.c src\orb_state.c "%OUT_DIR%\gui-resource.o" -o "%OUT_DIR%\mock\24510_0rb-ui-mock.exe" -lbcrypt -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 -liphlpapi -lws2_32
 if errorlevel 1 exit /b 1
 if not exist "%OUT_DIR%\payloads" mkdir "%OUT_DIR%\payloads"
 if errorlevel 1 exit /b 1
@@ -69,6 +79,14 @@ if not exist "%OUT_DIR%\payloads" exit /b 1
 copy /y payloads\hello.js "%OUT_DIR%\payloads\hello.js" >nul
 if errorlevel 1 exit /b 1
 copy /y payloads\banner.js "%OUT_DIR%\payloads\banner.js" >nul
+if errorlevel 1 exit /b 1
+if not exist "%OUT_DIR%\legacy" mkdir "%OUT_DIR%\legacy"
+if errorlevel 1 exit /b 1
+copy /y legacy\dc_cmd_script.js "%OUT_DIR%\legacy\dc_cmd_script.js" >nul
+if errorlevel 1 exit /b 1
+copy /y legacy\NOTICE.md "%OUT_DIR%\legacy\NOTICE.md" >nul
+if errorlevel 1 exit /b 1
+copy /y legacy\README.md "%OUT_DIR%\legacy\README.md" >nul
 if errorlevel 1 exit /b 1
 echo Native Windows GUI and clearly labeled mock GUI built.
 "%GCC%" %FLAGS% "-ffile-prefix-map=%CD%=." -municode tests\gui_harness.c -o "%OUT_DIR%\gui-harness.exe" -luser32 -lgdi32

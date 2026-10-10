@@ -308,7 +308,7 @@ static BOOL connect_op(void *unused, const DiscordRestartRequest *request, Disco
         discord_release(fresh); free(fresh);
         if (!inspected) return FALSE;
         if (!owned) { Sleep(100); continue; }
-        CdpRequest attempt = {request->app_directory, NULL, request->port, CDP_CONNECT, remaining < 1500 ? remaining : 1500, request->cancel_event};
+        CdpRequest attempt = {request->app_directory, NULL, request->port, CDP_CONNECT, remaining < 1500 ? remaining : 1500, request->cancel_event, installation->executable, NULL, NULL};
         CdpResult *result = calloc(1, sizeof(*result));
         if (!result) return fail(error, capacity, L"Out of memory connecting renderer.");
         cdp_run(&attempt, result);

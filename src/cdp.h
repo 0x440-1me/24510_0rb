@@ -4,7 +4,8 @@
 #include <windows.h>
 
 #define CDP_OUTPUT_CAP 65536
-typedef enum { CDP_CHECK, CDP_LIST, CDP_CONNECT, CDP_EVALUATE } CdpAction;
+typedef enum { CDP_CHECK, CDP_LIST, CDP_CONNECT, CDP_EVALUATE, CDP_DISPATCH, CDP_STOP_QUEST,
+               CDP_ORB_STATUS, CDP_ORB_SCAN, CDP_ORB_START } CdpAction;
 typedef enum { CDP_FINISHED, CDP_CANCELLED, CDP_TIMED_OUT, CDP_LAUNCH_FAILED, CDP_CONTROLLER_FAILED } CdpStatus;
 typedef struct {
     const wchar_t *app_directory;
@@ -13,6 +14,9 @@ typedef struct {
     CdpAction action;
     DWORD timeout_ms;
     HANDLE cancel_event; /* Caller owns; must remain valid throughout cdp_run. */
+    const wchar_t *discord_executable;
+    const char *sha256; /* Required for dispatch, verified against outgoing bytes. */
+    const char *orb_key; /* Opaque per-run marker, never emitted in logs. */
 } CdpRequest;
 typedef struct {
     CdpStatus status;
