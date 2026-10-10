@@ -1,0 +1,75 @@
+name: Native Windows build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'native-c-*']
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: false
+        default: ''
+    outputs:
+      source_sha:
+        value: ${{ jobs.build.outputs.source_sha }}
+      version:
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, mock tests and package
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      version: ${{ steps.verify.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install UCRT64 toolchain
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-headers
+            mingw-w64-ucrt-x86_64-crt
+      - name: Build, mock-test and verify clean packages
+        id: verify
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          ORB_EXPECTED_SHA: ${{ github.sha }}
+          ORB_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          & ./scripts/ci.ps1 -ExpectedSourceSha $env:ORB_EXPECTED_SHA -ReleaseTag $env:ORB_RELEASE_TAG -OutputDirectory (Join-Path $env:RUNNER_TEMP 'orb-package-a') -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'orb-ci-evidence')
+      - name: Upload verified release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-windows-x64-package
+          archive: true
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/orb-package-a/24510_0rb-v*-windows-x64.zip
+            ${{ runner.temp }}/orb-package-a/SHA256SUMS.txt
+      - name: Upload mock/build evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-test-evidence
+          archive: true
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/orb-ci-evidence/
