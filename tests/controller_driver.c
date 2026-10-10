@@ -12,7 +12,7 @@ int wmain(int argc, wchar_t **argv) {
     if (argc == 2 && !wcscmp(argv[1], L"--sentinel")) { Sleep(6000); return 0; }
     if (argc == 3 && !wcscmp(argv[1], L"--handles")) {
         DWORD cold = 0, before = 0, after = 0;
-        CdpRequest request = {argv[2], L"Z:\\orb-nonexistent-fixture\\missing.js", 1, CDP_EVALUATE, 2000, NULL};
+        CdpRequest request = {argv[2], L"Z:\\orb-nonexistent-fixture\\missing.js", 1, CDP_EVALUATE, 2000, NULL, NULL, NULL, NULL};
         CdpResult *result = calloc(1, sizeof(*result));
         if (!result || !GetProcessHandleCount(GetCurrentProcess(), &cold)) { free(result); return 8; }
         /* Retain the cold observation and compare repeated-operation growth

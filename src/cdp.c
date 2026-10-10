@@ -56,14 +56,15 @@ void cdp_run(const CdpRequest *request, CdpResult *result) {
     HANDLE read_pipe = NULL, write_pipe = NULL, input = INVALID_HANDLE_VALUE, job = NULL;
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
     PROCESS_INFORMATION process = {0};
-    wchar_t *exe = NULL, *quoted_exe = NULL, *quoted_file = NULL, *command = NULL;
+    wchar_t *exe = NULL, *quoted_exe = NULL, *quoted_file = NULL, *quoted_discord = NULL, *command = NULL;
     BOOL process_created = FALSE, child_finished = FALSE;
     memset(result, 0, sizeof(*result));
     result->status = CDP_CONTROLLER_FAILED;
     result->child_exit_code = STILL_ACTIVE;
     if (!request || !request->app_directory || !request->port || !request->timeout_ms ||
-        request->action > CDP_EVALUATE || request->action < CDP_CHECK ||
-        (request->action == CDP_EVALUATE && !request->payload_path)) {
+        request->action > CDP_ORB_START || request->action < CDP_CHECK ||
+        ((request->action == CDP_EVALUATE || (request->action == CDP_DISPATCH || request->action == CDP_ORB_START)) && !request->payload_path) ||
+        ((request->action == CDP_DISPATCH || request->action == CDP_ORB_START) && !request->sha256)) {
         result->windows_error = ERROR_INVALID_PARAMETER; goto cleanup;
     }
     if (cancelled(request->cancel_event)) { result->status = CDP_CANCELLED; goto cleanup; }
@@ -78,18 +79,35 @@ void cdp_run(const CdpRequest *request, CdpResult *result) {
         result->windows_error = ERROR_BAD_PATHNAME; goto cleanup;
     }
     quoted_exe = quote_arg(exe);
-    if (request->action == CDP_EVALUATE) quoted_file = quote_arg(request->payload_path);
-    if (!quoted_exe || (request->action == CDP_EVALUATE && !quoted_file)) {
+    if (request->action == CDP_EVALUATE || (request->action == CDP_DISPATCH || request->action == CDP_ORB_START)) quoted_file = quote_arg(request->payload_path);
+    if (!quoted_exe || ((request->action == CDP_EVALUATE || (request->action == CDP_DISPATCH || request->action == CDP_ORB_START)) && !quoted_file)) {
         result->windows_error = ERROR_NOT_ENOUGH_MEMORY; goto cleanup;
+    }
+    if (request->discord_executable && *request->discord_executable) {
+        quoted_discord = quote_arg(request->discord_executable);
+        if (!quoted_discord) { result->windows_error = ERROR_NOT_ENOUGH_MEMORY; goto cleanup; }
+    }
+    if (request->sha256) {
+        if (strlen(request->sha256) != 64 || strspn(request->sha256, "0123456789abcdef") != 64) {
+            result->windows_error = ERROR_INVALID_PARAMETER; goto cleanup;
+        }
+    }
+    if (request->orb_key && (strlen(request->orb_key) != 32 || strspn(request->orb_key,"0123456789abcdef") != 32)) {
+        result->windows_error = ERROR_INVALID_PARAMETER; goto cleanup;
     }
     const wchar_t *action = request->action == CDP_CHECK ? L"--check" :
                             request->action == CDP_LIST ? L"--list-targets" :
-                            request->action == CDP_CONNECT ? L"--connect" : L"--file";
-    size_t capacity = wcslen(quoted_exe) + (quoted_file ? wcslen(quoted_file) : 0) + 80;
+                            request->action == CDP_CONNECT ? L"--connect" : request->action == CDP_STOP_QUEST ? L"--stop-quest" : (request->action == CDP_ORB_STATUS || request->action == CDP_ORB_SCAN) ? L"--orb-status" : L"--file";
+    size_t capacity = wcslen(quoted_exe) + (quoted_file ? wcslen(quoted_file) : 0) + (quoted_discord ? wcslen(quoted_discord) : 0) + 280;
     if (capacity > 32767) { result->windows_error = ERROR_FILENAME_EXCED_RANGE; goto cleanup; }
     command = malloc(capacity * sizeof(*command));
     if (!command) { result->windows_error = ERROR_NOT_ENOUGH_MEMORY; goto cleanup; }
-    swprintf(command, capacity, L"%ls %ls %ls --port %u", quoted_exe, action, quoted_file ? quoted_file : L"", request->port);
+    swprintf(command, capacity, L"%ls %ls %ls --port %u %ls %ls %ls %ls %hs %ls %ls %hs", quoted_exe, action,
+             quoted_file ? quoted_file : L"", request->port,
+             (request->action == CDP_DISPATCH || request->action == CDP_ORB_START) ? L"--dispatch" : L"",
+             quoted_discord ? L"--discord-executable" : L"", quoted_discord ? quoted_discord : L"",
+             request->sha256 ? L"--sha256" : L"", request->sha256 ? request->sha256 : "", request->action == CDP_ORB_START ? L"--track-orb" : request->action == CDP_ORB_SCAN ? L"--scan-quests" : L"",
+             request->orb_key ? L"--orb-key" : L"", request->orb_key ? request->orb_key : "");
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     if (!CreatePipe(&read_pipe, &write_pipe, &security, 0) ||
         !SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0)) goto windows_failure;
@@ -158,6 +176,6 @@ cleanup:
     if (write_pipe) CloseHandle(write_pipe);
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
     if (attributes) { DeleteProcThreadAttributeList(attributes); free(attributes); }
-    free(command); free(quoted_file); free(quoted_exe); free(exe);
+    free(quoted_discord); free(command); free(quoted_file); free(quoted_exe); free(exe);
     result->elapsed_ms = GetTickCount64() - started;
 }

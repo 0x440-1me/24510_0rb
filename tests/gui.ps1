@@ -2,8 +2,9 @@ param([string]$EvidenceDirectory = (Join-Path $env:TEMP ('orb-ui-' + [guid]::New
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $null = New-Item -ItemType Directory -Force -Path $EvidenceDirectory
+$EvidenceDirectory=(Resolve-Path -LiteralPath $EvidenceDirectory).Path
 $harness = Join-Path $root 'bin\gui-harness.exe'
-$app = Join-Path $root 'bin\24510_0rb-ui-mock.exe'
+$app = Join-Path $root 'bin\mock\24510_0rb-ui-mock.exe'
 $fixture = Join-Path $PSScriptRoot 'mock_cdp.ps1'
 $hello = Join-Path $root 'payloads\hello.js'
 $unicode = Join-Path $EvidenceDirectory ('external ' + [char]0xD83D + [char]0xDE80 + '.js')
@@ -12,11 +13,13 @@ $preferences = Join-Path $env:LOCALAPPDATA '24510_0rb-ui-test\settings.ini'
 $original = if (Test-Path -LiteralPath $preferences) { [IO.File]::ReadAllBytes($preferences) } else { $null }
 $before = @(Get-Process Discord,DiscordPTB,DiscordCanary -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id | Sort-Object)
 $results = [Collections.Generic.List[object]]::new()
-function Invoke-UiCase([string]$Name,[string]$Action,[string]$Mode='', [string]$Payload=$hello,[string]$Expected='MOCK_EVAL_OK',[string]$Port='19234',[string]$Capture='') {
+function Invoke-UiCase([string]$Name,[string]$Action,[string]$Mode='', [string]$Payload=$hello,[string]$Expected='result withheld for privacy',[string]$Port='19234',[string]$Capture='') {
     $job = $null
     try {
         if ($Mode) {
-            $job = Start-Job -ScriptBlock { param($File,$Kind) & $File -Mode $Kind -Port 19234 } -ArgumentList $fixture,$Mode
+            $dispatch=$Action -in @('orb-run','request-stop')
+            $marker=if($Action -eq 'request-stop'){'window.stopQuestProgram()'}else{'JURI INJECTION SUCCESS'}
+            $job = Start-Job -ScriptBlock { param($File,$Kind,$Dispatch,$Marker) & $File -Mode $Kind -Port 19234 -Dispatch:$Dispatch -ExpectedText $Marker } -ArgumentList $fixture,$Mode,$dispatch,$marker
             $ready = $false
             for ($i=0; $i -lt 80; $i++) { if ((Receive-Job $job -Keep) -match 'MOCK_READY') { $ready=$true; break }; Start-Sleep -Milliseconds 100 }
             if (-not $ready) { throw 'Fixture did not become ready.' }
@@ -29,12 +32,15 @@ function Invoke-UiCase([string]$Name,[string]$Action,[string]$Mode='', [string]$
         Write-Output "$Name exit=$exitCode"
         if ($job) {
             $fixtureOutput=@(Receive-Job $job -Keep); $fixtureOutput | Set-Content -LiteralPath (Join-Path $EvidenceDirectory ($Name+'-fixture.log')) -Encoding utf8
-            if ($Action -eq 'smoke') { $silent = -not ($fixtureOutput -match 'MOCK_HTTP_REQUEST|MOCK_HANDSHAKE'); $results.Add([pscustomobject]@{name='startup-no-fixture-I/O';passed=$silent;exit=$(if($silent){0}else{1})}) }
+            if ($Action -in @('smoke','run-cancel','orb-cancel','orb-escape','orb-x','load-cancel')) { $silent = -not ($fixtureOutput -match 'MOCK_HTTP_REQUEST|MOCK_HANDSHAKE'); $results.Add([pscustomobject]@{name="$Action-no-fixture-I/O";passed=$silent;exit=$(if($silent){0}else{1})}) }
         }
     } finally { if ($job) { Stop-Job $job; Remove-Job $job } }
 }
 try {
     Invoke-UiCase 'startup' 'smoke' 'check' -Capture 'startup.bmp'
+    foreach($action in @('run-cancel','orb-cancel','orb-escape','orb-x','load-cancel')) { Invoke-UiCase $action $action 'check' }
+    Invoke-UiCase 'orb-synthetic-dispatch' 'orb-run' 'success'
+    Invoke-UiCase 'orb-stop-request' 'request-stop' 'success'
     Invoke-UiCase 'settings' 'settings' -Capture 'settings.bmp'
     Invoke-UiCase 'minimum' 'minimum' -Capture 'minimum.bmp'
     Invoke-UiCase 'dpi' 'dpi' -Capture 'dpi.bmp'

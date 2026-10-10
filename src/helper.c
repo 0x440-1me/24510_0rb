@@ -8,10 +8,14 @@
 #include <string.h>
 #include <wchar.h>
 #include <ctype.h>
+#include "payload.h"
+#include "discord_process.h"
+#include "orb_state.h"
+#include "resource.h"
 
 #define DEFAULT_PORT 9223
 #define MAX_HTTP_BYTES (16u * 1024u * 1024u)
-#define MAX_PAYLOAD_BYTES (64u * 1024u * 1024u)
+#define MAX_PAYLOAD_BYTES ORB_PAYLOAD_LIMIT
 #define MAX_WS_MESSAGE (80u * 1024u * 1024u)
 
 typedef struct { const char *p; size_t n; } Span;
@@ -20,7 +24,23 @@ typedef struct {
 } Target;
 
 static int g_verbose = 0;
+static const char *g_orb_key = "";
+static ULONGLONG g_receive_deadline;
 static void log_winhttp(const char *what);
+static wchar_t *g_discord_executable = NULL;
+static int endpoint_owned(unsigned short port) {
+#ifdef ORB_CDP_TEST_MOCK
+    (void)port; return 1; /* Separate fixture-only executable, never packaged. */
+#else
+    DiscordInstallation *installation = calloc(1, sizeof(*installation));
+    wchar_t error[512];
+    int ok = installation && discord_discover(g_discord_executable, installation, error, 512) &&
+             discord_listener_owned(port, installation, error, 512);
+    if (installation) { discord_release(installation); free(installation); }
+    if (!ok) fprintf(stderr, "Endpoint ownership not verified; request refused.\n");
+    return ok;
+#endif
+}
 
 static int harden_request(HINTERNET request) {
     DWORD disabled = WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_AUTHENTICATION;
@@ -227,6 +247,7 @@ static wchar_t *utf8_to_wide(const char *s) {
 }
 
 static char *http_get(unsigned short port, const wchar_t *path, DWORD *status) {
+    if (!endpoint_owned(port)) return NULL;
     HINTERNET session = WinHttpOpen(L"TSUKI-CDP/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     HINTERNET connect = NULL, request = NULL;
@@ -312,8 +333,12 @@ static int is_discord_target(const Target *t) {
 }
 
 static Target *choose_target(Target *a, size_t n) {
-    for (size_t i = 0; i < n; ++i) if (is_discord_target(&a[i])) return &a[i];
-    return NULL;
+    Target *selected = NULL;
+    for (size_t i = 0; i < n; ++i) if (is_discord_target(&a[i])) {
+        if (selected) return NULL; /* Ambiguous renderer: fail closed. */
+        selected = &a[i];
+    }
+    return selected;
 }
 
 static int parse_ws_url(const char *url, wchar_t **host, unsigned short *port, wchar_t **path, int *secure) {
@@ -348,6 +373,7 @@ static HINTERNET websocket_connect(const char *url, unsigned short expected_port
     }
     wchar_t *host = NULL, *path = NULL; unsigned short port; int secure;
     if (!parse_ws_url(url, &host, &port, &path, &secure)) { fprintf(stderr, "Invalid CDP WebSocket URL.\n"); return NULL; }
+    if (!endpoint_owned(port)) return NULL;
     HINTERNET session = WinHttpOpen(L"TSUKI-CDP/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) { log_winhttp("WinHttpOpen"); free(host); free(path); return NULL; }
@@ -388,6 +414,7 @@ static int ws_send_text(HINTERNET ws, const char *s, size_t n) {
 static char *ws_receive_message(HINTERNET ws, size_t *length) {
     BYTE buf[8192]; char *msg = NULL; size_t used = 0, cap = 0;
     for (;;) {
+        if (GetTickCount64() >= g_receive_deadline) { fprintf(stderr, "CDP response deadline reached.\n"); free(msg); return NULL; }
         DWORD got = 0; WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
         DWORD e = WinHttpWebSocketReceive(ws, buf, sizeof(buf), &got, &type);
         if (e != NO_ERROR) { SetLastError(e); log_winhttp("WinHttpWebSocketReceive"); free(msg); return NULL; }
@@ -407,10 +434,10 @@ static char *read_file_utf8(const char *name, size_t *length) {
     if (!wname) { fprintf(stderr, "Invalid file path encoding.\n"); return NULL; }
     HANDLE f = CreateFileW(wname, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     free(wname);
-    if (f == INVALID_HANDLE_VALUE) { fprintf(stderr, "Cannot open payload '%s' (Windows error %lu).\n", name, GetLastError()); return NULL; }
+    if (f == INVALID_HANDLE_VALUE) { fprintf(stderr, "Cannot open payload (Windows error %lu).\n", GetLastError()); return NULL; }
     LARGE_INTEGER size;
     if (!GetFileSizeEx(f, &size) || size.QuadPart < 0 || (uint64_t)size.QuadPart > MAX_PAYLOAD_BYTES) {
-        fprintf(stderr, "Payload must be at most 64 MiB.\n"); CloseHandle(f); return NULL;
+        fprintf(stderr, "Payload must be at most 4 MiB.\n"); CloseHandle(f); return NULL;
     }
     size_t n = (size_t)size.QuadPart; char *data = (char *)malloc(n + 1);
     if (!data) { fprintf(stderr, "Out of memory reading payload.\n"); CloseHandle(f); return NULL; }
@@ -441,10 +468,10 @@ static char *json_quote(const char *s, size_t n, size_t *out_n) {
     out[j++] = '"'; out[j] = 0; *out_n = j; return out;
 }
 
-static int create_evaluate_request(unsigned long id, const char *payload, size_t n, char **out, size_t *out_n) {
+static int create_evaluate_request(unsigned long id, const char *payload, size_t n, int dispatch, char **out, size_t *out_n) {
     size_t qn; char *q = json_quote(payload, n, &qn); if (!q) return 0;
     const char *prefix = "{\"id\":"; const char *mid = ",\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":";
-    const char *suffix = ",\"awaitPromise\":true,\"returnByValue\":true,\"userGesture\":true}}";
+    const char *suffix = dispatch ? ",\"awaitPromise\":false,\"returnByValue\":false,\"userGesture\":true}}" : ",\"awaitPromise\":true,\"returnByValue\":true,\"userGesture\":true}}";
     char number[32]; int nn = snprintf(number, sizeof(number), "%lu", id);
     size_t total = strlen(prefix) + (size_t)nn + strlen(mid) + qn + strlen(suffix);
     char *r = (char *)malloc(total + 1); if (!r) { free(q); return 0; }
@@ -456,37 +483,9 @@ static int create_evaluate_request(unsigned long id, const char *payload, size_t
     free(q); *out = r; *out_n = at; return 1;
 }
 
-static int response_is_exception(Span obj, char **message) {
+static int response_is_exception(Span obj) {
     Span result, ex;
-    if (!json_property(obj, "result", &result) || !json_property(result, "exceptionDetails", &ex)) return 0;
-    char *text = property_string(ex, "text");
-    Span exception; char *description = NULL;
-    if (json_property(ex, "exception", &exception)) description = property_string(exception, "description");
-    if (text && description) {
-        size_t n = strlen(text) + strlen(description) + 3;
-        *message = (char *)malloc(n);
-        if (*message) snprintf(*message, n, "%s: %s", text, description);
-    } else *message = description ? description : text;
-    if (description && text) free(description), free(text);
-    return 1;
-}
-
-static void print_eval_result(Span obj) {
-    Span outer, result;
-    if (!json_property(obj, "result", &outer) || !json_property(outer, "result", &result)) {
-        puts("JavaScript evaluated successfully (no return value).\n"); return;
-    }
-    char *type = property_string(result, "type");
-    Span value;
-    if (json_property(result, "value", &value)) {
-        if (value.n && value.p[0] == '"') {
-            char *s = decode_string(value); printf("Return value (%s): %s\n", type ? type : "string", s ? s : "<invalid string>"); free(s);
-        } else printf("Return value (%s): %.*s\n", type ? type : "value", (int)value.n, value.p);
-    } else {
-        char *desc = property_string(result, "description");
-        printf("Return value (%s): %s\n", type ? type : "undefined", desc ? desc : "<no by-value result>"); free(desc);
-    }
-    free(type);
+    return json_property(obj, "result", &result) && json_property(result, "exceptionDetails", &ex);
 }
 
 static int valid_remote_object(Span remote) {
@@ -498,16 +497,93 @@ static int valid_remote_object(Span remote) {
     free(type); return valid;
 }
 
-static int run_eval(Target *t, unsigned short port, const char *payload, size_t n) {
+/* Exchange only matching, validated responses. Events are never logged. */
+static char *exchange(HINTERNET ws, const char *request, size_t length, long wanted) {
+    if (!ws_send_text(ws, request, length)) return NULL;
+    for (unsigned i = 0; i < 1000 && GetTickCount64() < g_receive_deadline; ++i) {
+        size_t n; char *message = ws_receive_message(ws, &n); if (!message) return NULL;
+        const char *start = message, *end = message + n; skip_ws(&start, end);
+        const char *valid = scan_value_depth(start, end, 0); if (valid) skip_ws(&valid, end);
+        Span obj = {message, n}; long id;
+        if (!valid || valid != end || start == end || *start != '{') { free(message); return NULL; }
+        if (property_long(obj, "id", &id) && id == wanted) return message;
+        free(message);
+    }
+    return NULL;
+}
+static int true_response(const char *message) {
+    if (!message) return 0;
+    Span obj={message,strlen(message)}, outer, remote, value;
+    return !response_is_exception(obj) && json_property(obj,"result",&outer) &&
+           json_property(outer,"result",&remote) && json_property(remote,"value",&value) &&
+           value.n==4 && !memcmp(value.p,"true",4);
+}
+static int reserve_orb(HINTERNET ws) {
+    char code[700];
+    snprintf(code,sizeof(code),"(() => { if (location.origin !== 'https://discord.com' || location.pathname !== '/quest-home' || document.readyState !== 'complete' || window.__24510Orb?.phase === 1 || typeof window.stopQuestProgram === 'function' || window.__questRunnerActive === true) return false; window.__24510Orb = {phase:1,key:'%s',reserved:true,startedAt:Date.now()}; return true; })()",g_orb_key);
+    char *request=NULL; size_t n;
+    if (!create_evaluate_request(3,code,strlen(code),0,&request,&n)) return 0;
+    char *response=exchange(ws,request,n,3); free(request);
+    int ok=true_response(response); free(response); return ok;
+}
+static int track_orb(HINTERNET ws, Span remote) {
+    char *subtype=property_string(remote,"subtype"), *id=property_string(remote,"objectId");
+    if (!subtype || strcmp(subtype,"promise") || !id || strlen(id)>1024) { free(subtype);free(id);return 0; }
+    free(subtype); size_t quoted_n; char *quoted=json_quote(id,strlen(id),&quoted_n);free(id);
+    if (!quoted) return 0;
+    const char *function = "function(){ const s=window.__24510Orb; if (!s?.reserved) return false; this.then(()=>{s.phase=2},()=>{s.phase=3}); return true; }";
+    size_t fn_n;char *fn=json_quote(function,strlen(function),&fn_n);
+    size_t cap=quoted_n+fn_n+180;char *request=fn?malloc(cap):NULL;
+    if (!request) {free(quoted);free(fn);return 0;}
+    snprintf(request,cap,"{\"id\":2,\"method\":\"Runtime.callFunctionOn\",\"params\":{\"objectId\":%s,\"functionDeclaration\":%s,\"awaitPromise\":false,\"returnByValue\":true}}",quoted,fn);
+    free(quoted);free(fn);char *response=exchange(ws,request,strlen(request),2);free(request);
+    int ok=true_response(response);free(response);return ok;
+}
+static int print_status(Span remote) {
+    Span value;if(!json_property(remote,"value",&value) || !value.n || value.p[0]!='{') return 0;
+    const char *names[]={"signal","hook","active","reliable","error","eligible","completed","unaccepted","unfinished","progress","target","activity","route"};
+    long values[13];
+    for(unsigned i=0;i<13;++i) if(!property_long(value,names[i],&values[i]) || values[i]<-1 || values[i]>100000000) return 0;
+    OrbSnapshot status={(int)values[0],(int)values[1],(int)values[2],(int)values[3],(int)values[4],(int)values[5],(int)values[6],(int)values[7],(int)values[8],(int)values[9],(int)values[10],(int)values[11],(int)values[12]};
+    if(!orb_snapshot_valid(&status)) return 0;
+    printf("ORB_STATUS signal=%d hook=%d active=%d reliable=%d error=%d eligible=%d completed=%d unaccepted=%d unfinished=%d progress=%d target=%d activity=%d route=%d\n",status.signal,status.hook,status.active,status.reliable,status.error,status.eligible,status.completed,status.unaccepted,status.unfinished,status.progress,status.target,status.activity,status.route);
+    return 1;
+}
+static char *status_code(int scan, size_t *n) {
+    HRSRC resource=FindResourceW(NULL,MAKEINTRESOURCEW(ID_STATUS_ADAPTER),RT_RCDATA);
+    HGLOBAL loaded=resource?LoadResource(NULL,resource):NULL;
+    const char *bytes=loaded?LockResource(loaded):NULL;DWORD length=resource?SizeofResource(NULL,resource):0;
+    if(!bytes || !length || length>32768) return NULL;
+    char *code=malloc((size_t)length+160);if(!code)return NULL;
+    int prefix=snprintf(code,140,"(() => {const __ORB_SCAN__=%s,__ORB_KEY__='%s'; return (",scan?"true":"false",g_orb_key);
+    memcpy(code+prefix,bytes,length);*n=(size_t)prefix+length;
+    memcpy(code+*n,");})()",7);*n+=6;code[*n]=0;return code;
+}
+static int quest_home_ready(HINTERNET ws) {
+    const char *code="location.origin === 'https://discord.com' && location.pathname === '/quest-home' && document.readyState === 'complete'";
+    char *request=NULL;size_t length=0;
+    if(!create_evaluate_request(4,code,strlen(code),0,&request,&length))return 0;
+    char *response=exchange(ws,request,length,4);free(request);
+    int ok=true_response(response);free(response);return ok;
+}
+static int run_eval(Target *t, unsigned short port, const char *payload, size_t n, int dispatch, int tracking, int status_query) {
     HINTERNET ws = websocket_connect(t->ws, port); if (!ws) return 4;
+    g_receive_deadline = GetTickCount64() + 15000;
+    if (tracking && (!quest_home_ready(ws) || !endpoint_owned(port))) {
+        puts("ORB_PREFLIGHT refused; zero payload dispatch. Open Discord -> Quests and return here to start.");
+        WinHttpCloseHandle(ws); return 9;
+    }
+    if (tracking && !reserve_orb(ws)) { fprintf(stderr,"Start refused: existing or unknown renderer program.\n"); WinHttpCloseHandle(ws); return 7; }
     const unsigned long request_id = 1;
     char *request = NULL; size_t request_n = 0;
-    if (!create_evaluate_request(request_id, payload, n, &request, &request_n)) { fprintf(stderr, "Could not construct CDP request.\n"); WinHttpCloseHandle(ws); return 8; }
+    if (!create_evaluate_request(request_id, payload, n, dispatch, &request, &request_n)) { fprintf(stderr, "Could not construct CDP request.\n"); WinHttpCloseHandle(ws); return 8; }
     if (g_verbose) fprintf(stderr, "Connected to renderer; sending Runtime.evaluate (%zu payload bytes).\n", n);
+    if (!endpoint_owned(port)) { WinHttpCloseHandle(ws); return 3; }
+    g_receive_deadline = GetTickCount64() + 15000;
     int ok = ws_send_text(ws, request, request_n); free(request);
     if (!ok) { WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0); WinHttpCloseHandle(ws); return 4; }
     int exit_code = 4, matched_response = 0;
-    for (unsigned i = 0; i < 1000; ++i) {
+    for (unsigned i = 0; i < 1000 && GetTickCount64() < g_receive_deadline; ++i) {
         size_t message_n = 0; char *message = ws_receive_message(ws, &message_n);
         if (!message) break;
         Span obj = { message, message_n }; long id = -1;
@@ -520,25 +596,29 @@ static int run_eval(Target *t, unsigned short port, const char *payload, size_t 
         }
         if (property_long(obj, "id", &id) && id == (long)request_id) {
             matched_response = 1;
-            char *ex = NULL;
             Span protocol_error, response_result, remote_result;
             if (json_property(obj, "error", &protocol_error)) {
-                char *error_message = property_string(protocol_error, "message");
-                fprintf(stderr, "CDP command error: %s\n", error_message ? error_message : "(details unavailable)");
-                free(error_message); exit_code = 4;
+                fprintf(stderr, "CDP command error (details withheld).\n"); exit_code = 4;
             }
-            else if (response_is_exception(obj, &ex)) { fprintf(stderr, "JavaScript exception: %s\n", ex ? ex : "(details unavailable)"); free(ex); exit_code = 5; }
+            else if (response_is_exception(obj)) { fprintf(stderr, "JavaScript exception (details withheld).\n"); exit_code = 5; }
             else if (!json_property(obj, "result", &response_result) || response_result.n == 0 || response_result.p[0] != '{' ||
                      !json_property(response_result, "result", &remote_result) || remote_result.n == 0 || remote_result.p[0] != '{' ||
                      !valid_remote_object(remote_result)) {
                 fprintf(stderr, "Malformed CDP evaluation response: result or error required.\n"); exit_code = 4;
             }
-            else { print_eval_result(obj); exit_code = 0; }
+            else if (status_query) {
+                if (print_status(remote_result)) exit_code=0;
+                else { fprintf(stderr,"Status observation malformed / state unknown.\n");exit_code=4; }
+            }
+            else {
+                if (tracking) printf("ORB_LIFECYCLE signal=%d\n", track_orb(ws,remote_result)?1:0);
+                puts(dispatch ? "JavaScript dispatched; renderer state unknown." : "JavaScript evaluated; result withheld for privacy."); exit_code = 0;
+            }
             free(message); break;
         }
         if (g_verbose) {
             Span method;
-            if (json_property(obj, "method", &method)) fprintf(stderr, "Ignoring unrelated CDP event (%.*s).\n", (int)method.n, method.p);
+            if (json_property(obj, "method", &method)) fprintf(stderr, "Ignoring unrelated CDP event (details withheld).\n");
         }
         free(message);
     }
@@ -556,6 +636,8 @@ static void usage(void) {
          "  orb-cdp.exe --list-targets [--port N]\n"
          "  orb-cdp.exe --connect [--port N]\n"
          "  orb-cdp.exe --file PATH [--port N] [--verbose]\n"
+         "  orb-cdp.exe --file PATH --dispatch --sha256 HASH [--port N]\n"
+         "  orb-cdp.exe --stop-quest [--port N]\n"
          "  orb-cdp.exe --help\n\n"
          "The CDP connection is made only to 127.0.0.1.\n"
          "Exit codes: 0 success, 2 usage, 3 endpoint/target unavailable,\n"
@@ -564,28 +646,64 @@ static void usage(void) {
 
 static int cli_main(int argc, char **argv) {
     unsigned short port = DEFAULT_PORT; const char *file = NULL;
-    int check = 0, list = 0, connect_only = 0, help = 0;
+    int check = 0, list = 0, connect_only = 0, help = 0, dispatch = 0, stop = 0, tracking = 0, status_query = 0, scan = 0;
+    const char *expected_hash = NULL; wchar_t *configured = NULL;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) help = 1;
         else if (!strcmp(argv[i], "--check")) check = 1;
         else if (!strcmp(argv[i], "--list-targets")) list = 1;
         else if (!strcmp(argv[i], "--connect")) connect_only = 1;
+        else if (!strcmp(argv[i], "--orb-status")) status_query = 1;
+        else if (!strcmp(argv[i], "--scan-quests")) scan = 1;
+        else if (!strcmp(argv[i], "--track-orb")) tracking = 1;
+        else if (!strcmp(argv[i], "--orb-key") && i+1<argc) g_orb_key=argv[++i];
+        else if (!strcmp(argv[i], "--dispatch")) dispatch = 1;
+        else if (!strcmp(argv[i], "--stop-quest")) stop = 1;
+        else if (!strcmp(argv[i], "--sha256") && i + 1 < argc) expected_hash = argv[++i];
+        else if (!strcmp(argv[i], "--discord-executable") && i + 1 < argc) {
+            free(configured); configured = utf8_to_wide(argv[++i]);
+            if (!configured) return 2;
+            g_discord_executable = configured;
+        }
         else if (!strcmp(argv[i], "--verbose")) g_verbose = 1;
         else if (!strcmp(argv[i], "--file") && i + 1 < argc) file = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             char *end; long p = strtol(argv[++i], &end, 10);
             if (*end || p < 1 || p > 65535) { fprintf(stderr, "Invalid port.\n"); return 2; }
             port = (unsigned short)p;
-        } else { fprintf(stderr, "Unknown or incomplete argument: %s\n", argv[i]); usage(); return 2; }
+        } else { fprintf(stderr, "Unknown or incomplete argument.\n"); usage(); return 2; }
     }
     if (help) { usage(); return 0; }
-    if ((int)check + (int)list + (int)connect_only + (file != NULL) != 1) { usage(); return 2; }
+    if ((*g_orb_key && (strlen(g_orb_key)!=32 || strspn(g_orb_key,"0123456789abcdef")!=32)) || (tracking && !*g_orb_key)) { fprintf(stderr,"Invalid run marker.\n"); return 2; }
+    if ((int)check + (int)list + (int)connect_only + (file != NULL) + stop + status_query != 1 || (dispatch && (!file || !expected_hash)) || (expected_hash && !file) || (tracking && !dispatch) || (scan && !status_query)) { usage(); return 2; }
 
     char *payload = NULL;
     size_t payload_n = 0;
     if (file) {
         payload = read_file_utf8(file, &payload_n);
         if (!payload) return 6;
+        char actual[65];
+        if (!payload_n || memchr(payload, 0, payload_n) || payload_n > ORB_PAYLOAD_LIMIT ||
+            !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, payload, (int)payload_n, NULL, 0) ||
+            !orb_hash(payload, payload_n, actual) || (expected_hash && strcmp(actual, expected_hash))) {
+            free(payload); fprintf(stderr, "Payload invalid or consent hash mismatch; nothing sent.\n"); return 6;
+        }
+#ifdef ORB_CDP_TEST_MOCK
+        if (!strcmp(actual, ORB_ORIGINAL_SHA)) {
+            free(payload); fprintf(stderr, "Fixture helper refuses original legacy payload.\n"); return 2;
+        }
+#else
+        if (!strcmp(actual, ORB_ORIGINAL_SHA) && (!dispatch || !expected_hash)) {
+            free(payload); fprintf(stderr, "Original Orb requires reviewed hash-bound dispatch.\n"); return 2;
+        }
+#endif
+    }
+    if (status_query) { payload=status_code(scan,&payload_n);if(!payload)return 8; }
+    if (stop) {
+        const char *expression = "if (typeof window.stopQuestProgram === 'function') { window.stopQuestProgram(); }";
+        payload = malloc(strlen(expression) + 1);
+        if (!payload) return 8;
+        strcpy(payload, expression); payload_n = strlen(payload); dispatch = 1;
     }
 
     wchar_t path[64]; DWORD status = 0;
@@ -595,9 +713,9 @@ static int cli_main(int argc, char **argv) {
         if (!version) { fprintf(stderr, "CDP endpoint unavailable at 127.0.0.1:%u.\n", port); return 3; }
         if (status != 200) { fprintf(stderr, "CDP endpoint returned HTTP %lu.\n", status); free(version); return 3; }
         printf("CDP endpoint available at 127.0.0.1:%u.\n", port);
-        printf("%s\n", version); free(version);
+        free(version); /* Never emit raw endpoint JSON. */
     }
-    if (check || list || connect_only || file) {
+    if (check || list || connect_only || file || stop || status_query) {
         swprintf(path, 64, L"/json/list");
         char *json = http_get(port, path, &status);
         if (!json) { fprintf(stderr, "Could not retrieve CDP target list from 127.0.0.1:%u.\n", port); free(payload); return 3; }
@@ -609,7 +727,7 @@ static int cli_main(int argc, char **argv) {
             printf("Targets at 127.0.0.1:%u (%zu):\n", port, count);
             for (size_t i = 0; i < count; ++i)
                 printf("  [%zu] type=%s websocket=%s discord-renderer=%s\n", i + 1,
-                       targets[i].type ? targets[i].type : "?",
+                       is_discord_target(&targets[i]) ? "Discord page" : "other (withheld)",
                        targets[i].ws ? "available" : "absent",
                        is_discord_target(&targets[i]) ? "yes" : "no");
             free_targets(targets, count); return 0;
@@ -628,7 +746,8 @@ static int cli_main(int argc, char **argv) {
             if (ws) { puts("Renderer WebSocket handshake verified; connection closed."); WinHttpCloseHandle(ws); }
             free_targets(targets, count); return ws ? 0 : 4;
         }
-        int rc = run_eval(target, port, payload, payload_n);
+        int rc = run_eval(target, port, payload, payload_n, dispatch, tracking, status_query);
+        if (stop) puts(rc == 0 ? "Stop requested / state unknown." : "Stop delivery failed / state unknown.");
         free(payload); free_targets(targets, count); return rc;
     }
     return 0;
@@ -646,6 +765,7 @@ int wmain(int argc, wchar_t **wide_argv) {
         }
     }
     int code = cli_main(argc, argv);
+    free(g_discord_executable); g_discord_executable = NULL;
     for (int i = 0; i < argc; ++i) free(argv[i]);
     free(argv); return code;
 }

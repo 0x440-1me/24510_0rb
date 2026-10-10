@@ -1,4 +1,16 @@
-# Validation status for native 0.2.0
+# Validation status
+
+## Local v1.0.0 pre-release verification (2026-10-10)
+
+Saved local evidence records native C state 50/50, payload 11/11, process 52/52, v0.3 synthetic dispatch/privacy/ownership 23/23, and Foundation 37/37 passing entries. The Foundation JSON records all passes; the outer command's exit code was not captured.
+
+The native mock GUI script reports 8/8 modes passed in `bin/evidence-v1-eightstates-final-20261010/summary.json`. Its Ready, Running, and All completed screenshots are genuine Win32 mock-mode window captures; they are not live Discord validation.
+
+The adapter suite recorded 80/80 synthetic checks against the exact SHA-256-verified adapter source in a separate isolated Node environment, not Windows Edge. The Windows Edge fixture was blocked by a GPU crash.
+
+The local native executable reports FileVersion and ProductVersion 1.0.0. The original JavaScript remains unchanged and SHA-256-pinned. A private development ZIP was verified before these documentation changes; these edits change package inputs, so the post-documentation ZIP has not yet been verified.
+
+No real Discord execution or real-account validation was performed for this v1.0.0 pre-release evidence.
 
 Hosted account-free mock results and prior permitted local real-CDP results have
 different scopes. Windows 10 version 1809+ and Windows 11 x64 are declared targets;
@@ -82,3 +94,20 @@ publication and verification records.
 Private development-VM evidence, personal paths, Discord process IDs and account
 data are excluded from public artifacts. Hosted CI evidence contains account-free
 mock/build logs, including its own runner paths and fixture process IDs.
+## Historical local v0.3 checkpoint (2026-10-10)
+
+JijiPC, Windows 11, MSYS2 UCRT64 GCC 16.2.0 Rev4; warnings treated as errors.
+Native process tests 52/52, locked-payload/SHA-256 tests 11/11, Foundation
+37/37, v0.3 synthetic dispatch/privacy/ownership checks 23/23, native mock GUI
+39/39. The first runs found picker timing, DPI harness timeout, relative
+evidence path and Windows PowerShell fixture compatibility issues; these were
+fixed and the affected suites rerun successfully. No execution guard was
+bypassed. Separate ports avoid test-fixture collisions.
+
+The owner-authorized development ZIP verified 17 manifest asset hashes,
+18 exact entries, original SHA-256, attribution and the separate MIT exclusion.
+The original is only copied/hashed. No original execution, account Quest
+request, Discord restart, push, PR or release was performed. Live behavior,
+cooperative stop cleanup and Windows 10 remain unverified. The existing
+screenshots elsewhere in this document are historical v0.2.0 evidence.
+

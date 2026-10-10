@@ -1,0 +1,4 @@
+#include <windows.h>
+#include "resource.h"
+ID_STATUS_ADAPTER RCDATA "orb-status.js"
+#include "version.rc"

@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.0] — Unreleased
+
+- Native Win32 ribbon icon and four-state primary UI: restart/connect, start, stop, and completed/retry.
+- Quest Home (`/quest-home`) is a required preflight before the approved original dispatch.
+- Read-only eligible-quest status aggregation; explicit per-run consent and no automatic start.
+- Safer stop messaging that does not claim cleanup, plus a read-only Retry scan and fail-closed unknown/rate-limit handling.
+- Original JavaScript remains unchanged and source-pinned by SHA-256, with separate attribution and notice.
+- Synthetic state, payload, process, dispatch/privacy, foundation, adapter, and mock GUI coverage; no real Discord execution.
+
+## Historical v0.3 development checkpoint (VERSION was 0.2.0 at that checkpoint)
+
+- Native Original Orb import/review and per-run consent, locked byte snapshot,
+  SHA-256-verified outgoing dispatch, session duplicate guard and singleton UI.
+- Separate bounded renderer stop hook; honest unknown-state reporting.
+- Privacy-safe helper diagnostics and fail-closed normal endpoint ownership.
+- About/version and missing-helper preflight; account-free consent/mock tests.
+- Owner-authorized bundle of unchanged original, separately attributed and
+  excluded from MIT; explicit package/verifier hash and notice checks.
+- No original execution, real-account test, public push, merge or release.
+
 ## 0.2.0
 
 - Native C11 Win32 interface and packaged native WinHTTP helper.
@@ -14,4 +34,4 @@ The first verified [PR run](https://github.com/0x440-1me/24510_0rb/actions/runs/
 
 ## Historical source
 
-Original Git history and attribution are retained. See legacy/original-readme.md for the original author's notes; those artifacts have separate rights and are not app payloads.
+Original Git history and attribution are retained. See legacy/original-readme.md for the original author's notes; those artifacts have separate rights. The unchanged script is now an explicitly confirmed experimental payload under owner bundling permission; the historical readme remains repository-only.

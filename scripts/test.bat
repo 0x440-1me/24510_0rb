@@ -11,6 +11,10 @@ call scripts\build.bat
 if errorlevel 1 exit /b 1
 bin\process-test.exe
 if errorlevel 1 exit /b 1
+bin\payload-test.exe
+if errorlevel 1 exit /b 1
+powershell.exe -NoProfile -File tests\v03.ps1 -EvidenceDirectory bin\evidence-v03
+if errorlevel 1 exit /b 1
 set "EVIDENCE=%TEMP%\24510_0rb-tests-%RANDOM%"
 powershell.exe -NoProfile -File tests\foundation.ps1 -EvidenceDirectory "%EVIDENCE%"
 set "RC=%ERRORLEVEL%"
