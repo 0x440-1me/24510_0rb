@@ -52,7 +52,7 @@ Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The fir
 
 The app selects an approved installation, checks IPv4/IPv6 port ownership, requests ordinary window close, waits for exit, rechecks the port and launches the selected executable with loopback-only debugging arguments. It never force-kills Discord. Multiple installed/running channels may require an explicit approved executable in Settings.
 
-Tray-only clients, a close-to-tray setting, incomplete discovery, port conflicts and shutdown timeouts can stop the operation. A failure after shutdown may leave Discord stopped; cancellation after launch reports that launch occurred and asks you to check its process state. **Automated live restart is blocked in the development environment; the shared flow and GUI are mock-tested, and a user manual result is pending.** Do not use the application to circumvent an execution guard.
+Tray-only clients, a close-to-tray setting, incomplete discovery, port conflicts and shutdown timeouts can stop the operation. A failure after shutdown may leave Discord stopped; cancellation after launch reports that launch occurred and asks you to check its process state. The shared restart flow and affirmative GUI path are mock-tested. **The user reports a successful manual Windows 11 test: Restart Discord reopened Discord, Connect succeeded and hello.js ran. This was not independently observed and does not validate the hosted binaries against real Discord. Automated live restart remains blocked in the development environment.** Do not use the application to circumvent an execution guard.
 
 ## External payloads
 
@@ -85,7 +85,7 @@ Included hello.js returns a marker; banner.js displays a removable banner. Scrip
 
 This is an **unofficial** Discord integration, unaffiliated with Discord. Internal renderer/CDP behavior can change. Local debugging exposes privileged script access; keep it on loopback and do not run untrusted payloads. This project does not test Quest spoofing, account automation or anti-abuse evasion. See [SECURITY.md](SECURITY.md), [test results](docs/test-results.md) and [architecture](docs/architecture.md).
 
-Validated behavior includes harmless real renderer handshake/evaluation/exceptions/Unicode file edits, mock restart sequencing/UI, consent cancellation, responsive Stop and cleanup. Physical DPI monitor migration, injected allocation/window/result-post failures and normal live restart remain unverified. Stop may leave already-evaluated effects in place. A worker busy during window close is cancelled before the app finishes closing.
+Validated behavior includes harmless real renderer handshake/evaluation/exceptions/Unicode file edits, mock restart sequencing/UI, consent cancellation, responsive Stop and cleanup. The manual restart result above is user-reported. Physical DPI monitor migration, injected allocation/window/result-post failures and independently observed normal live restart remain unverified. Stop may leave already-evaluated effects in place. A worker busy during window close is cancelled before the app finishes closing.
 
 ## Legacy and license
 

@@ -51,10 +51,20 @@ tested against real Discord. Initial failures were retained, diagnosed and
 corrected before the passing counts. No Quest/account-affecting JavaScript was
 tested.
 
+## User-reported manual production result
+
+The user reported a successful manual test in the Windows 11 development VM:
+they confirmed Restart Discord, Discord reopened, Connect succeeded and hello.js
+ran. This is a user report for the locally available production app, not an
+independently observed test or validation of hosted/release binaries against real
+Discord. No automated production confirmation, restart, shutdown or launch was
+performed. No timing, current process/endpoint state or wider workload behavior
+is inferred from that report.
+
 ## Blocked or not verified
 
 - Automated actual Discord restart/shutdown/launch: blocked by the execution guard;
-  mocked success does not prove live restart. User manual outcome is pending.
+  mocked success does not prove live restart. The manual result above is user-reported.
 - Public Windows PowerShell test wrapper in the development VM: policy refused it.
   No bypass or alternate launch retry was used. Approved direct component evidence
   and the separate hosted runner's approved pwsh execution are distinct results.

@@ -21,9 +21,11 @@ Different future toolchains/runner/compression runtimes may change bytes.
 Prior permitted Windows 11 real renderer checks used a separate local GCC Rev4
 build and only harmless handshake, evaluation, exceptions and Unicode file edits.
 These are not real-CDP tests of the hosted Rev5 binaries. Restart sequencing/affirmative UI
-were mock-tested. Automated real Discord restart and the development VM's public
-WindowsPS test wrapper remain blocked without bypass; user manual restart outcome
-is pending. Physical DPI migration and injected OS/allocation faults are unverified.
+were mock-tested. The user reports that a manual Windows 11 production restart
+reopened Discord, then Connect succeeded and hello.js ran. This was not independently
+observed and is not a live test of hosted/release binaries. Automated real Discord
+restart and the development VM's public WindowsPS test wrapper remain blocked
+without bypass. Physical DPI migration and injected OS/allocation faults are unverified.
 
 Stop cannot undo JavaScript already evaluated. Restart may interrupt calls or
 streams; graceful close can fail or time out. Cancel after shutdown may leave

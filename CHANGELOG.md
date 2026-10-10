@@ -10,7 +10,7 @@
 - Public build/security/test documentation and deterministic package tooling.
 - Hosted Windows Server 2025 build/mock CI: native process 52/52, Foundation 37/37 and GUI 27/27 with 310 assertions; downloaded build artifacts and repeatable packages verified.
 
-The first verified [PR run](https://github.com/0x440-1me/24510_0rb/actions/runs/38005830743) and [feature run](https://github.com/0x440-1me/24510_0rb/actions/runs/38005826992) used account-free mocks. Prior harmless real-CDP checks used a separate Windows 11 local build. Normal live restart remains unverified, with the user's manual result pending. Publication and downloaded-release verification records are maintained in [Issue #2](https://github.com/0x440-1me/24510_0rb/issues/2) and on the [release page](https://github.com/0x440-1me/24510_0rb/releases); this source entry is not itself a publication claim.
+The first verified [PR run](https://github.com/0x440-1me/24510_0rb/actions/runs/38005830743) and [feature run](https://github.com/0x440-1me/24510_0rb/actions/runs/38005826992) used account-free mocks. Prior harmless real-CDP checks used a separate Windows 11 local build. The user reports a successful manual Windows 11 production restart, followed by Connect and hello.js; this was not independently observed and is not a hosted-binary live test. Automated live restart remains blocked. Publication and downloaded-release verification records are maintained in [Issue #2](https://github.com/0x440-1me/24510_0rb/issues/2) and on the [release page](https://github.com/0x440-1me/24510_0rb/releases); this source entry is not itself a publication claim.
 
 ## Historical source
 
