@@ -1,5 +1,8 @@
 # Validation status
 
+## Local v1.0.1 restart hotfix (2026-10-11)
+The isolated native Windows build in `bin/build-hotfix-v101-20261011` completed successfully. The synthetic restart/process suite recorded TOTAL passed=61 failed=0, including nine pure updater/path tests (eight Stage 1 cases and one case-insensitive APP- case). The offline state suite recorded STATE_SUMMARY total=50 passed=50 failed=0. The ribbon executable resource verifier recorded RIBBON_VERIFY PASS. No actual Discord restart, Squirrel Update.exe launch, CDP renderer handshake or Quest script execution was performed; this hotfix still needs manual Windows verification and new hosted CI. The official v1.0.0 release and CI are separate evidence and do not verify this hotfix.
+
 ## Local v1.0.0 pre-release verification (2026-10-10)
 
 Saved local evidence records native C state 50/50, payload 11/11, process 52/52, v0.3 synthetic dispatch/privacy/ownership 23/23, and Foundation 37/37 passing entries. The Foundation JSON records all passes; the outer command's exit code was not captured.

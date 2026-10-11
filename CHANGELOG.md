@@ -1,6 +1,11 @@
 # Changelog
 
-## [1.0.0] — Unreleased
+## [1.0.1] — Unreleased
+
+- Restart now uses the approved Squirrel Update.exe --processStart path and forwards loopback CDP startup arguments instead of launching versioned Discord.exe directly.
+- Updater validation runs before Discord shutdown, and failed CreateProcessW startup reports the numeric Windows error; no forced quit is added, exact ownership checks and explicit consent remain. Tests are synthetic; no live restart is claimed.
+
+## [1.0.0] — Released 2026-10-11
 
 - Native Win32 ribbon icon and four-state primary UI: restart/connect, start, stop, and completed/retry.
 - Quest Home (`/quest-home`) is a required preflight before the approved original dispatch.

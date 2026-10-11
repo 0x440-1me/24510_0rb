@@ -13,7 +13,7 @@ static BOOL mock_stage(Mock *mock, unsigned stage, const DiscordRestartRequest *
     if (stage == DISCORD_LAUNCH) {
         wchar_t command[512];
         mock->arguments_ok = discord_build_command(installation->executable, request->port, command, 512) &&
-            !wcscmp(command, L"\"C:\\Fixture Space\\Discord\\app-1.2.3\\Discord.exe\" --remote-debugging-address=127.0.0.1 --remote-debugging-port=7733");
+            !wcscmp(command, L"\"C:\\Fixture Space\\Discord\\Update.exe\" --processStart Discord.exe --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=7733\"");
     }
     if ((int)stage == mock->cancel_stage) SetEvent(request->cancel_event);
     if ((int)stage == mock->fail_stage) { wcsncpy(error, L"Injected operation failure", capacity - 1); return FALSE; }
@@ -81,6 +81,21 @@ static void state_tests(void) {
     CloseHandle(cancel); wchar_t command[512];
     check(!discord_build_command(L"C:\\bad\"name.exe", 7733, command, 512), "quoted-path-injection-rejected");
     check(!discord_build_command(L"C:\\Discord.exe", 0, command, 512), "zero-command-port-rejected");
+    check(discord_build_command(L"C:\\Fixture Space\\Discord\\APP-1.2.3\\Discord.exe", 7733, command, 512) &&
+        !wcscmp(command, L"\"C:\\Fixture Space\\Discord\\Update.exe\" --processStart Discord.exe --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=7733\""), "uppercase-app-version-path");
+    check(discord_build_command(L"C:\\Fixture Space\\DiscordPTB\\app-2.3.4\\DiscordPTB.exe", 7733, command, 512) &&
+        !wcscmp(command, L"\"C:\\Fixture Space\\DiscordPTB\\Update.exe\" --processStart DiscordPTB.exe --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=7733\""), "ptb-updater-command");
+    check(discord_build_command(L"C:\\Fixture Space\\DiscordPTB\\app-2.3.4\\Discord.exe", 7733, command, 512) &&
+        !wcscmp(command, L"\"C:\\Fixture Space\\DiscordPTB\\Update.exe\" --processStart Discord.exe --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=7733\""), "ptb-discord-exe-fallback-command");
+    check(discord_build_command(L"C:\\Fixture Space\\DiscordCanary\\app-4.5.6\\DiscordCanary.exe", 7733, command, 512) &&
+        !wcscmp(command, L"\"C:\\Fixture Space\\DiscordCanary\\Update.exe\" --processStart DiscordCanary.exe --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=7733\""), "canary-updater-command");
+    check(discord_build_command(L"C:\\用戶 資料\\Discord\\app-1.2.3\\Discord.exe", 7733, command, 512) &&
+        !wcscmp(command, L"\"C:\\用戶 資料\\Discord\\Update.exe\" --processStart Discord.exe --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=7733\""), "unicode-spaces-root-command");
+    check(!discord_build_command(L"C:\\Fixture\\Discord\\app-1.2.3\\..\\Discord.exe", 7733, command, 512), "path-traversal-rejected");
+    check(!discord_build_command(L"C:\\Fixture\\Discord\\app-x\\Discord.exe", 7733, command, 512), "invalid-version-rejected");
+    wchar_t short_command[8];
+    check(!discord_build_command(L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe", 7733, short_command, 8), "short-buffer-rejected");
+    check(!discord_build_command(L"C:\\Fixture\\Discord\\Discord.exe", 7733, command, 512), "non-versioned-path-rejected");
 }
 static void port_tests(void) {
     WSADATA data; if (WSAStartup(MAKEWORD(2,2), &data)) { check(FALSE, "socket-fixture-startup"); return; }
