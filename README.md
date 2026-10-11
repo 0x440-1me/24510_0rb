@@ -1,8 +1,8 @@
 # 24510_0rb
 
-**24510_0rb v1.0.2 (unreleased development build).**
+**24510_0rb v1.0.3 (unreleased development build).**
 
-**Latest public release: v1.0.1. v1.0.2 is under development and is not yet published.**
+**Latest public release: v1.0.2. v1.0.3 is under development and is not yet published.**
 
 24510_0rb is a native C11 / Win32 controller for a consent-based Discord Quest experiment. It connects to an approved local renderer through CDP, reviews exact local JavaScript bytes, and presents bounded, privacy-conscious status. No Node.js, Python, Electron or Visual Studio runtime is required.
 
@@ -14,7 +14,7 @@
 - Quick start/About, helper preflight and honest renderer stop requests.
 - Configurable loopback port, bounded operation timeouts and readable errors.
 - Renderer handshake verification with a timestamp, and Discord process state from the last check.
-- Explicit restart consent, exact installed-image selection and graceful shutdown failure handling.
+- Explicit restart consent, exact installed-image selection and an optional pinned-process tray-exit fallback after a 10-second graceful-close wait.
 - Responsive workers, bounded logs and cancellation of the application's own helper.
 
 ### Historical v0.2 screenshots
@@ -41,7 +41,7 @@ Nothing auto-starts on launch, Connect, restart, or file selection. Rate limits 
 
 Mock-mode screenshots and synthetic tests do not validate live Discord behavior or real-account results.
 
-v1.0.1 uses the approved Discord Update.exe --processStart path and validates the updater before shutdown. A later one-shot direct updater recovery on the real Stable installation returned exit 0, launched app-1.0.9261\Discord.exe with the requested loopback CDP flags, and exposed /json/version with HTTP 200. This verifies the installed updater command path only; the Orb GUI restart button and its native renderer handshake have not passed live acceptance. v1.0.2 development fixes the post-update version mismatch by rediscovering the running image and accepting only the same validated installation channel/root.
+v1.0.1 uses the approved Discord Update.exe --processStart path and validates the updater before shutdown. v1.0.2 fixes the post-update version mismatch by rediscovering the running image and accepting only the same validated installation channel/root.
 
 
 
@@ -105,9 +105,9 @@ Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The fir
 
 **Restart Discord** opens a warning about interrupted calls, streams and other activities. **Cancel is the default**; Cancel, Escape and the dialog close button leave Discord untouched. Only the affirmative button starts the restart worker.
 
-The app selects an approved installation, checks IPv4/IPv6 port ownership, requests ordinary window close, waits for exit, rechecks the port and launches the selected executable with loopback-only debugging arguments. It never force-kills Discord. Multiple installed/running channels may require an explicit approved executable in Settings.
+The app selects an approved installation, checks IPv4/IPv6 port ownership, requests ordinary window close and waits up to 10 seconds. The consent dialog has a checked-by-default option to allow force-closing only the originally pinned Discord processes from that selected installation if they remain alive. Uncheck it to require graceful exit. Before terminating each process, Orb rechecks its retained handle, PID and executable image; it then confirms all pinned processes exited within 5 seconds before rechecking the port and launching through the selected installation's updater with loopback-only debugging arguments. A failed identity check, cancellation, occupied port or unconfirmed exit stops the restart. Multiple installed/running channels may require an explicit approved executable in Settings.
 
-Tray-only clients, a close-to-tray setting, incomplete discovery, port conflicts and shutdown timeouts can stop the operation. A failure after shutdown may leave Discord stopped; cancellation after launch reports that launch occurred and asks you to check its process state. The shared restart flow and affirmative GUI path are mock-tested. **The user reported a previous manual Windows 11 result; it was not independently observed and is not v1.0.0 validation or evidence for a public binary. Automated live restart remains unverified.** Do not use the application to circumvent an execution guard.
+Force-closing Discord can interrupt calls or streams and may lose unsaved Discord activity. Cancel is the default dialog action; cancelling during shutdown may leave Discord closed. A failure after shutdown may also leave Discord stopped. The v1.0.3 native production restart path passed one local live harness run: status 0 through the renderer handshake, with the restarted Stable client owning port 9223 and `/json/version` returning HTTP 200. The physical GUI restart button and checkbox interaction were not exercised, and this local evidence does not validate a published binary. No Quest or JavaScript payload ran. Do not use the application to circumvent an execution guard.
 
 ## External payloads
 
@@ -131,7 +131,7 @@ Included hello.js returns a marker; banner.js displays a removable banner. Scrip
 | Native controller could not start | Keep orb-cdp.exe in the extracted app folder. |
 | JavaScript exception | Details are withheld for privacy; review the trusted external source locally. |
 | Port conflict | Choose a free local port; foreign or wildcard listeners cannot be reused for restart. |
-| Graceful exit timeout / no window | Quit Discord manually through its own controls where authorized, then retry an authorized setup. No force-kill fallback exists. |
+| Graceful exit timeout / no window | If the checked consent option remains enabled, Orb may terminate only verified pinned processes from the selected installation after 10 seconds. Uncheck the option to require graceful exit. If the restart fails, inspect Discord's process state before retrying. |
 | Installation ambiguous | Select an approved installed Discord executable in Settings. |
 | Invalid preferences | Invalid/missing numeric fields fall back to defaults. Repair invalid optional paths in Settings. |
 | Test script refused by policy | Use an already approved PowerShell environment or report the refusal. Test scripts never change or bypass policy. |
@@ -140,7 +140,7 @@ Included hello.js returns a marker; banner.js displays a removable banner. Scrip
 
 This is an **unofficial** Discord integration, unaffiliated with Discord. Internal renderer/CDP behavior can change. Local debugging exposes privileged script access; keep it on loopback and do not run untrusted payloads. This project does not test Quest spoofing, account automation or anti-abuse evasion. See [SECURITY.md](SECURITY.md), [test results](docs/test-results.md) and [architecture](docs/architecture.md).
 
-Validated behavior includes harmless real renderer handshake/evaluation/exceptions/Unicode file edits, mock restart sequencing/UI, consent cancellation, responsive Stop and cleanup. The manual restart result above is user-reported. Physical DPI monitor migration, injected allocation/window/result-post failures and independently observed normal live restart remain unverified. Stop may leave already-evaluated effects in place. A worker busy during window close is cancelled before the app finishes closing.
+Validated behavior includes harmless real renderer handshake/evaluation/exceptions/Unicode file edits, mock restart sequencing/UI, consent cancellation, responsive Stop and cleanup, and one local native production restart harness run for v1.0.3. The physical GUI dialog and button click remain unverified. Physical DPI monitor migration and injected allocation/window/result-post failures are also unverified. Stop may leave already-evaluated effects in place. A worker busy during window close is cancelled before the app finishes closing. See [test results](docs/test-results.md) for build and live-run scope.
 
 ## Legacy and license
 

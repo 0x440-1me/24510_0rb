@@ -1,6 +1,12 @@
 # Changelog
 
-## [1.0.2] — Unreleased
+## [1.0.3] — Unreleased
+
+- Added a consent-dialog option to force-close only verified, originally pinned Discord processes from the selected installation when graceful close has not exited after 10 seconds; Orb confirms exit within 5 seconds before continuing through the existing port, updater and CDP checks.
+- The dialog warns that calls and streams may be interrupted and defaults to Cancel. Force-close consent is checked by default and can be unchecked.
+- Local v1.0.3 native build passed process tests 72/72 and state tests 50/50. One source-linked production restart harness run completed through CDP handshake; see `docs/test-results.md`. The physical GUI click path remains unverified; no Quest or JavaScript payload ran.
+
+## [1.0.2] — Released 2026-10-11
 
 - Post-launch verification now discovers the current Discord image after Squirrel updates and accepts a version change only when the canonical Update.exe path confirms the same installation root and channel.
 - The CDP helper receives the fresh executable path; listener ownership is rechecked against the same process across the renderer handshake.
