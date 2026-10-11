@@ -1,3 +1,9 @@
+## v1.0.2 development status — not released
+
+The latest public release remains v1.0.1. The confirmed v1.0.1 defect was a post-update path mismatch: Squirrel selected a newer app-* executable, while the controller kept probing the pre-update image. v1.0.2 development permits only same-channel/same-root version migration and binds the CDP helper and post-handshake ownership check to the newly discovered executable.
+
+A direct, approved Stable Update.exe recovery was observed to exit 0, start app-1.0.9261\Discord.exe with loopback CDP flags, and expose /json/version with HTTP 200. This is a command-line updater recovery, not live acceptance of the Orb GUI restart button or its native renderer handshake. No Quest/JavaScript payload was run.
+
 Native C11 / Win32 controller with a packaged WinHTTP helper, external Unicode
 JavaScript files, on-demand renderer verification, settings and explicit restart
 consent. Extract the ZIP and keep both production executables together.
