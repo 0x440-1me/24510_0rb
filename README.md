@@ -1,8 +1,8 @@
 # 24510_0rb
 
-**24510_0rb v1.0.0 (unreleased development build).**
+**24510_0rb v1.0.0.**
 
-**The latest PUBLIC release remains v0.2.0 until approval.** This checkout is an unreleased development build, not a public release.
+**Latest public release: v1.0.0; v1.0.1 restart hotfix is under development and is not yet published.**
 
 24510_0rb is a native C11 / Win32 controller for a consent-based Discord Quest experiment. It connects to an approved local renderer through CDP, reviews exact local JavaScript bytes, and presents bounded, privacy-conscious status. No Node.js, Python, Electron or Visual Studio runtime is required.
 
@@ -21,7 +21,7 @@
 
 ![Historical v0.2 native controller](docs/images/app.png)
 
-*Historical v0.2 capture; not the v1.0.0 development UI.*
+*Historical v0.2 capture; not the v1.0.0 UI.*
 
 
 
@@ -33,13 +33,15 @@
 
 *Mock-mode test captures; not live Discord validation.*
 
-## v1.0.0 behavior (unreleased development build)
+## v1.0.0 behavior
 
 The four primary actions guide the run lifecycle. **Restart Discord to Connect** always asks for explicit confirmation. **Start Orb** requires explicit per-run consent; the in-app Discord page must be ready at `/quest-home` and remain open while it runs. **Stop Orb** makes a best-effort cooperative request and cannot guarantee cleanup or rollback. **All completed!** appears only after a reliable eligible-quest scan; **Retry** performs another read-only scan.
 
 Nothing auto-starts on launch, Connect, restart, or file selection. Rate limits and unknown or unreliable renderer state fail closed: the app does not infer completion or automatically retry, and it blocks another start until a safe verified reset.
 
 Mock-mode screenshots and synthetic tests do not validate live Discord behavior or real-account results.
+
+The v1.0.1 restart hotfix under development uses approved Discord Update.exe with --processStart, forwards the loopback debugging arguments, and validates updater availability before asking Discord to close. It has not been tested with a real Discord account or live restart.
 
 
 

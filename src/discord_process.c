@@ -230,8 +230,12 @@ BOOL discord_listener_owned(unsigned short port, const DiscordInstallation *inst
 static BOOL discover_op(void *context, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
     (void)context; return discord_discover(request->configured_executable, installation, error, capacity);
 }
+static BOOL verify_updater_for_selected(const wchar_t *selected_exe, wchar_t *error, size_t capacity);
+
 static BOOL preflight_op(void *context, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
-    (void)context; return discord_port_available(request->port, installation, FALSE, error, capacity);
+    (void)context;
+    if (!discord_port_available(request->port, installation, FALSE, error, capacity)) return FALSE;
+    return verify_updater_for_selected(installation->executable, error, capacity);
 }
 static BOOL free_op(void *context, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
     (void)context; return discord_port_available(request->port, installation, TRUE, error, capacity);
@@ -270,9 +274,78 @@ static BOOL wait_op(void *unused, const DiscordRestartRequest *request, DiscordI
         Sleep(20);
     }
 }
+static BOOL discord_updater_path(const wchar_t *selected_exe, wchar_t *updater, size_t cap) {
+    if (!selected_exe || !updater || !cap) return FALSE;
+    size_t path_len = wcslen(selected_exe);
+    if (path_len < 3 || path_len >= DISCORD_PATH_CAP) return FALSE;
+    if (!((selected_exe[0] >= L'A' && selected_exe[0] <= L'Z') ||
+          (selected_exe[0] >= L'a' && selected_exe[0] <= L'z')) ||
+        selected_exe[1] != L':' || selected_exe[2] != L'\\' ||
+        wcschr(selected_exe, L'"') || wcschr(selected_exe, L'/') ||
+        wcschr(selected_exe, L'\r') || wcschr(selected_exe, L'\n')) return FALSE;
+    for (const wchar_t *p = selected_exe + 3; *p;) {
+        const wchar_t *end = wcschr(p, L'\\');
+        size_t length = end ? (size_t)(end - p) : wcslen(p);
+        if (!length || (length == 1 && p[0] == L'.') ||
+            (length == 2 && p[0] == L'.' && p[1] == L'.')) return FALSE;
+        if (!end) break;
+        p = end + 1;
+        if (!*p) return FALSE;
+    }
+    const wchar_t *app_marker = NULL;
+    for (const wchar_t *p = selected_exe; *p; ++p) {
+        if (*p == L'\\' && p[1] && _wcsnicmp(p + 1, L"app-", 4) == 0)
+            app_marker = p;
+    }
+    if (!app_marker) return FALSE;
+    const wchar_t *version_start = app_marker + 5;
+    const wchar_t *version_end = wcschr(version_start, L'\\');
+    if (!version_end || !version_end[1] || wcschr(version_end + 1, L'\\')) return FALSE;
+    size_t version_len = (size_t)(version_end - version_start);
+    if (!version_len || version_len >= 64) return FALSE;
+    wchar_t version[64];
+    wmemcpy(version, version_start, version_len);
+    version[version_len] = 0;
+    if (!version_valid(version)) return FALSE;
+    const wchar_t *channel_start = app_marker - 1;
+    while (channel_start > selected_exe && channel_start[-1] != L'\\') --channel_start;
+    size_t channel_len = (size_t)(app_marker - channel_start);
+    BOOL discord = channel_len == 7 && !_wcsnicmp(channel_start, L"Discord", 7);
+    BOOL ptb = channel_len == 10 && !_wcsnicmp(channel_start, L"DiscordPTB", 10);
+    BOOL canary = channel_len == 13 && !_wcsnicmp(channel_start, L"DiscordCanary", 13);
+    const wchar_t *basename = version_end + 1;
+    BOOL exe_ok = (discord && !_wcsicmp(basename, L"Discord.exe")) ||
+        (ptb && (!_wcsicmp(basename, L"DiscordPTB.exe") || !_wcsicmp(basename, L"Discord.exe"))) ||
+        (canary && (!_wcsicmp(basename, L"DiscordCanary.exe") || !_wcsicmp(basename, L"Discord.exe")));
+    if (!exe_ok) return FALSE;
+    size_t root_len = (size_t)(app_marker - selected_exe);
+    static const wchar_t suffix[] = L"\\Update.exe";
+    const size_t suffix_len = sizeof(suffix) / sizeof(*suffix) - 1;
+    if (root_len > (size_t)-1 - suffix_len - 1 || cap < root_len + suffix_len + 1) return FALSE;
+    wmemcpy(updater, selected_exe, root_len);
+    wmemcpy(updater + root_len, suffix, suffix_len + 1);
+    return TRUE;
+}
+static BOOL verify_updater_for_selected(const wchar_t *selected_exe, wchar_t *error, size_t capacity) {
+    const wchar_t *message = L"Discord Update.exe unavailable or outside approved installation; restart cannot continue.";
+    wchar_t updater[DISCORD_PATH_CAP], real_path[DISCORD_PATH_CAP];
+    HANDLE handle = NULL;
+    if (!discord_updater_path(selected_exe, updater, DISCORD_PATH_CAP) ||
+        !canonical_file(updater, real_path, &handle)) return fail(error, capacity, message);
+    BOOL valid = !_wcsicmp(real_path, updater);
+    CloseHandle(handle);
+    return valid ? TRUE : fail(error, capacity, message);
+}
 BOOL discord_build_command(const wchar_t *executable, unsigned short port, wchar_t *output, size_t capacity) {
-    if (!executable || !*executable || wcschr(executable, L'"') || !port || capacity < wcslen(executable) + 100) return FALSE;
-    return swprintf(output, capacity, L"\"%ls\" --remote-debugging-address=127.0.0.1 --remote-debugging-port=%u", executable, port) > 0;
+    if (!executable || !output || !capacity || !port) return FALSE;
+    wchar_t updater[DISCORD_PATH_CAP];
+    if (!discord_updater_path(executable, updater, DISCORD_PATH_CAP)) return FALSE;
+    const wchar_t *basename = wcsrchr(executable, L'\\');
+    if (!basename || !*++basename) return FALSE;
+    int written = swprintf(output, capacity,
+        L"\"%ls\" --processStart %ls --process-start-args \"--remote-debugging-address=127.0.0.1 --remote-debugging-port=%u\"",
+        updater, basename, port);
+    return written >= 0 && (size_t)written < capacity;
 }
 static BOOL launch_op(void *unused, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
     (void)unused;
@@ -285,12 +358,25 @@ static BOOL launch_op(void *unused, const DiscordRestartRequest *request, Discor
     discord_release(fresh); free(fresh);
     if (!inspected) return FALSE;
     if (running) return fail(error, capacity, L"Selected Discord installation still runs or respawned; launch refused.");
-    wchar_t command[DISCORD_PATH_CAP + 128];
-    if (!discord_build_command(installation->executable, request->port, command, sizeof(command) / sizeof(*command))) return fail(error, capacity, L"Cannot construct exact Discord launch arguments.");
+    if (!verify_updater_for_selected(installation->executable, error, capacity)) return FALSE;
+    wchar_t updater[DISCORD_PATH_CAP], current_directory[DISCORD_PATH_CAP];
+    if (!discord_updater_path(installation->executable, updater, DISCORD_PATH_CAP)) return fail(error, capacity, L"Discord Update.exe unavailable or outside approved installation; restart cannot continue.");
+    wcscpy(current_directory, updater);
+    wchar_t *directory_sep = wcsrchr(current_directory, L'\\');
+    if (!directory_sep) return fail(error, capacity, L"Discord updater directory is invalid; launch refused.");
+    *directory_sep = 0;
+    wchar_t command[DISCORD_PATH_CAP + 256];
+    if (!discord_build_command(installation->executable, request->port, command, sizeof(command) / sizeof(*command))) return fail(error, capacity, L"Cannot construct exact Discord updater arguments.");
     STARTUPINFOW startup = {0}; startup.cb = sizeof(startup); PROCESS_INFORMATION process = {0};
     if (!discord_port_available(request->port, installation, TRUE, error, capacity)) return FALSE;
     if (cancel_requested(request->cancel_event)) return fail(error, capacity, L"Launch cancelled before process creation.");
-    if (!CreateProcessW(installation->executable, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process)) return fail(error, capacity, L"Discord launch failed; no alternate launch attempted.");
+    if (!CreateProcessW(updater, command, NULL, NULL, FALSE, 0, NULL, current_directory, &startup, &process)) {
+        DWORD launch_error = GetLastError();
+        if (!error || !capacity) return fail(error, capacity, L"Discord updater launch failed; no alternate launch attempted.");
+        int written = swprintf(error, capacity, L"Discord updater launch failed (Windows error %lu); no alternate launch attempted.", (unsigned long)launch_error);
+        if (written < 0 || (size_t)written >= capacity) return fail(error, capacity, L"Discord updater launch failed; no alternate launch attempted.");
+        return FALSE;
+    }
     CloseHandle(process.hThread); installation->launched_process = process.hProcess; return TRUE;
 }
 static BOOL connect_op(void *unused, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
