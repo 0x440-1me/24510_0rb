@@ -9,6 +9,7 @@ static void check(BOOL ok, const char *name) { printf("%s %s\n", ok ? "PASS" : "
 typedef struct { int fail_stage, cancel_stage; unsigned calls[DISCORD_STAGE_COUNT], order[DISCORD_STAGE_COUNT], count, released; BOOL arguments_ok; } Mock;
 static BOOL mock_stage(Mock *mock, unsigned stage, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
     ++mock->calls[stage]; mock->order[mock->count++] = stage;
+    if (stage == DISCORD_WAIT_EXIT) mock->arguments_ok = request->allow_force_quit_on_timeout;
     if (stage == DISCORD_DISCOVER) wcscpy(installation->executable, L"C:\\Fixture Space\\Discord\\app-1.2.3\\Discord.exe");
     if (stage == DISCORD_LAUNCH) {
         wchar_t command[512];
@@ -31,7 +32,7 @@ static void mock_release(void *context, DiscordInstallation *installation) { (vo
 static DiscordRestartOps mock_ops(Mock *mock) { DiscordRestartOps ops = {{mock_discover, mock_preflight, mock_shutdown, mock_wait, mock_free, mock_launch, mock_connect}, mock_release, mock}; return ops; }
 static void state_tests(void) {
     HANDLE cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
-    DiscordRestartRequest request = {FALSE, NULL, L"C:\\Fixture", 7733, 1000, 1000, cancel};
+    DiscordRestartRequest request = {FALSE, NULL, L"C:\\Fixture", 7733, 1000, 1000, cancel, FALSE};
     DiscordRestartResult result; Mock mock = {-1, -1, {0}, {0}, 0, 0, FALSE}; DiscordRestartOps ops = mock_ops(&mock);
     discord_restart(&request, &ops, &result);
     check(result.status == DISCORD_NO_CONSENT && mock.count == 0 && mock.released == 0 && !result.shutdown_attempted, "no-consent-zero-operations");
@@ -42,6 +43,10 @@ static void state_tests(void) {
     BOOL order = mock.count == DISCORD_STAGE_COUNT;
     for (unsigned i = 0; i < mock.count; ++i) if (mock.order[i] != i) order = FALSE;
     check(result.status == DISCORD_RESTART_SUCCESS && order && mock.arguments_ok && mock.released == 1 && result.shutdown_attempted && result.shutdown_requested && result.launched, "successful-mock-order-and-exact-arguments");
+    Mock opt_in = {DISCORD_WAIT_EXIT, -1, {0}, {0}, 0, 0, FALSE}; ops = mock_ops(&opt_in); request.allow_force_quit_on_timeout = TRUE;
+    discord_restart(&request, &ops, &result);
+    check(result.status == DISCORD_EXIT_TIMEOUT && opt_in.arguments_ok && opt_in.calls[DISCORD_WAIT_EXIT] == 1, "force-quit-opt-in-reaches-wait-stage");
+    request.allow_force_quit_on_timeout = FALSE;
     static const struct {const char *name; int stage; DiscordRestartStatus status;} cases[] = {
         {"missing-installation", DISCORD_DISCOVER, DISCORD_DISCOVERY_FAILED},
         {"ambiguous-installation", DISCORD_DISCOVER, DISCORD_DISCOVERY_FAILED},

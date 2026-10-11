@@ -1,5 +1,15 @@
 # Validation status
 
+## Local v1.0.3 build and production restart acceptance (2026-10-11)
+
+The isolated native Windows build in `bin/review-v103b-20261011` completed with exit code 0 using MSYS2 UCRT64 GCC 16.2.0 Rev4 and warnings as errors. `process-test.exe` exited 0 with 72 passed and 0 failed; `orb-state-test.exe` exited 0 with 50 passed and 0 failed. The production GUI and helper report PE FileVersion and ProductVersion 1.0.3. `git diff --check` passed.
+
+One temporary native harness linked the v1.0.3 production `discord_process.c` and `cdp.c` and called `discord_restart` with consent and the force-close option enabled. It reported `status=0`, `last_stage=6` (CDP connect), `shutdown_attempted=1`, `shutdown_requested=1`, `launched=1`, and `Restart and renderer handshake verified.` The run took approximately 11.7 seconds based on the redirected output file timestamps. The harness did not call the GUI or execute any Quest/JavaScript payload.
+
+After the run, six Discord Stable 1.0.9261 processes were running, no PTB/Canary process was present, one loopback listener on port 9223 belonged to Stable Discord, and GET `/json/version` returned HTTP 200. No recovery restart was needed. This is a live test of the native production restart stages against the installed Stable client, not a physical click-through test of the GUI dialog, checkbox or restart button. GUI consent propagation and presentation remain unverified. Force-closing may interrupt calls or streams and may lose unsaved Discord activity.
+
+The local executables and harness are development artifacts, not a published v1.0.3 package. No source/docs were changed for the live test, no other Discord channels were restarted, and no Quest or JavaScript payload ran.
+
 ## Live updater recovery and v1.0.2 validation (2026-10-11)
 
 One approved direct invocation of the installed Stable Update.exe was observed after a partial shutdown. It returned exit code 0 and selected app-1.0.9261\Discord.exe from the prior app-1.0.9260 installation. Six Stable Discord processes appeared in session 1; the single listener on 9223 was loopback and owned by Stable Discord; GET /json/version returned HTTP 200 (Chrome/148.0.7778.280, protocol 1.3). This proves the installed Squirrel launch path and endpoint response only. The Orb GUI button and its native CDP renderer handshake were not exercised.
@@ -74,20 +84,21 @@ tested against real Discord. Initial failures were retained, diagnosed and
 corrected before the passing counts. No Quest/account-affecting JavaScript was
 tested.
 
-## User-reported manual production result
+## Earlier user-reported manual production result (pre-v1.0.3)
 
 The user reported a successful manual test in the Windows 11 development VM:
 they confirmed Restart Discord, Discord reopened, Connect succeeded and hello.js
 ran. This is a user report for the locally available production app, not an
 independently observed test or validation of hosted/release binaries against real
-Discord. No automated production confirmation, restart, shutdown or launch was
-performed. No timing, current process/endpoint state or wider workload behavior
-is inferred from that report.
+Discord. The separate v1.0.3 native production restart acceptance above was
+independently run and observed; it did not click the GUI or execute hello.js.
 
 ## Blocked or not verified
 
-- Automated actual Discord restart/shutdown/launch: blocked by the execution guard;
-  mocked success does not prove live restart. The manual result above is user-reported.
+- Physical GUI restart button and consent-checkbox click-through: not verified.
+  The v1.0.3 native production restart stages passed through the renderer handshake,
+  but the harness bypassed the GUI dialog and did not verify its visual state or
+  GUI-to-worker consent propagation.
 - Public Windows PowerShell test wrapper in the development VM: policy refused it.
   No bypass or alternate launch retry was used. Approved direct component evidence
   and the separate hosted runner's approved pwsh execution are distinct results.

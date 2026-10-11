@@ -19,6 +19,7 @@ typedef struct {
     DWORD exit_timeout_ms;
     DWORD endpoint_timeout_ms;
     HANDLE cancel_event;
+    BOOL allow_force_quit_on_timeout; /* Caller must obtain explicit user consent before setting TRUE. */
 } DiscordRestartRequest;
 typedef enum {
     DISCORD_RESTART_SUCCESS, DISCORD_NO_CONSENT, DISCORD_CANCELLED,

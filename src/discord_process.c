@@ -265,17 +265,152 @@ static BOOL shutdown_op(void *unused, const DiscordRestartRequest *request, Disc
     BOOL enumerated = EnumWindows(close_window, (LPARAM)&context);
     if (!enumerated && !context.failed) return fail(error, capacity, L"Window enumeration incomplete; no launch will follow.");
     if (context.failed) return fail(error, capacity, L"Graceful shutdown request failed or was cancelled.");
-    if (!context.closed) return fail(error, capacity, L"No validated Discord window accepted graceful shutdown; use Discord Quit manually.");
+    if (!context.closed && !request->allow_force_quit_on_timeout) return fail(error, capacity, L"No validated Discord window accepted graceful shutdown; use Discord Quit manually.");
     return TRUE;
 }
+static BOOL force_quit_error(wchar_t *error, size_t capacity, const wchar_t *message, BOOL has_code, DWORD code) {
+    if (!error || !capacity) return FALSE;
+    int written;
+    if (has_code) written = swprintf(error, capacity, L"%ls (Windows error %lu).", message, (unsigned long)code);
+    else written = swprintf(error, capacity, L"%ls", message);
+    if (written < 0 || (size_t)written >= capacity) return fail(error, capacity, L"Targeted Discord close failed; launch was refused.");
+    return FALSE;
+}
+
+static BOOL force_quit_pinned_processes(const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
+    BOOL terminated_any = FALSE;
+    const DWORD access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE;
+
+    if (!installation || !installation->executable[0] || installation->process_count > DISCORD_PROCESS_CAP ||
+        !discord_same_installation_channel(installation->executable, installation->executable))
+        return fail(error, capacity, L"Selected Discord installation identity is invalid; targeted close was refused.");
+
+    for (size_t i = 0; i < installation->process_count; ++i) {
+        HANDLE original = installation->processes[i];
+        DWORD pid = installation->pids[i];
+        HANDLE termination = NULL;
+
+        if (cancel_requested(request->cancel_event)) {
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close cancelled; some verified processes may have exited. Launch was refused."
+                : L"Targeted Discord close cancelled before any process was terminated.");
+        }
+        if (!original || !pid) {
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close incomplete; some verified processes may have exited. Pinned process identity is invalid."
+                : L"Pinned Discord process identity is invalid; targeted close was refused.");
+        }
+        if (WaitForSingleObject(original, 0) == WAIT_OBJECT_0) continue;
+        if (!image_matches(original, pid, installation->executable)) {
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close incomplete; some verified processes may have exited. Original process identity changed."
+                : L"Original Discord process identity changed; targeted close was refused.");
+        }
+
+        termination = OpenProcess(access, FALSE, pid);
+        if (!termination) {
+            DWORD open_error = GetLastError();
+            if (WaitForSingleObject(original, 0) == WAIT_OBJECT_0) continue;
+            return force_quit_error(error, capacity, terminated_any
+                ? L"Targeted Discord close incomplete; some verified processes may have exited. Windows denied access to another pinned process; no unverified process was terminated"
+                : L"Windows denied termination access to a verified Discord process; no unverified process was terminated",
+                TRUE, open_error);
+        }
+
+        /* The retained handle prevents PID reuse from substituting another process.
+           Recheck both handles after reopening, then again immediately before termination. */
+        if (WaitForSingleObject(original, 0) == WAIT_OBJECT_0) {
+            CloseHandle(termination);
+            continue;
+        }
+        if (!image_matches(original, pid, installation->executable) ||
+            !image_matches(termination, pid, installation->executable) ||
+            !discord_same_installation_channel(installation->executable, installation->executable)) {
+            CloseHandle(termination);
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close incomplete; some verified processes may have exited. Reopened process identity changed; no unverified process was terminated."
+                : L"Reopened Discord process identity changed; targeted close was refused.");
+        }
+        if (cancel_requested(request->cancel_event)) {
+            CloseHandle(termination);
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close cancelled; some verified processes may have exited. Launch was refused."
+                : L"Targeted Discord close cancelled before any process was terminated.");
+        }
+        if (WaitForSingleObject(original, 0) == WAIT_OBJECT_0) {
+            CloseHandle(termination);
+            continue;
+        }
+        if (!image_matches(original, pid, installation->executable) ||
+            !image_matches(termination, pid, installation->executable)) {
+            CloseHandle(termination);
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close incomplete; some verified processes may have exited. Process identity changed; no unverified process was terminated."
+                : L"Discord process identity changed immediately before targeted close; termination was refused.");
+        }
+        if (cancel_requested(request->cancel_event)) {
+            CloseHandle(termination);
+            return fail(error, capacity, terminated_any
+                ? L"Targeted Discord close cancelled; some verified processes may have exited. Launch was refused."
+                : L"Targeted Discord close cancelled before any process was terminated.");
+        }
+        if (!TerminateProcess(termination, ERROR_CANCELLED)) {
+            DWORD terminate_error = GetLastError();
+            CloseHandle(termination);
+            if (WaitForSingleObject(original, 0) == WAIT_OBJECT_0) continue;
+            return force_quit_error(error, capacity, terminated_any
+                ? L"Targeted Discord close incomplete; some verified processes may have exited. Windows could not terminate another pinned process; no unverified process was terminated"
+                : L"Windows could not terminate a verified Discord process; no unverified process was terminated",
+                TRUE, terminate_error);
+        }
+        terminated_any = TRUE;
+        CloseHandle(termination);
+    }
+
+    {
+        ULONGLONG deadline = GetTickCount64() + 5000;
+        for (;;) {
+            BOOL all_exited = TRUE;
+            if (cancel_requested(request->cancel_event)) {
+                return fail(error, capacity, terminated_any
+                    ? L"Targeted Discord close wait cancelled; some verified processes may have exited. Launch was refused."
+                    : L"Targeted Discord close wait cancelled; launch was refused.");
+            }
+            for (size_t i = 0; i < installation->process_count; ++i) {
+                DWORD wait_result = WaitForSingleObject(installation->processes[i], 0);
+                if (wait_result == WAIT_FAILED) {
+                    DWORD wait_error = GetLastError();
+                    return force_quit_error(error, capacity, terminated_any
+                        ? L"Targeted Discord close incomplete; some verified processes may have exited. Windows could not confirm process exit; launch was refused"
+                        : L"Windows could not confirm pinned Discord process exit; launch was refused",
+                        TRUE, wait_error);
+                }
+                if (wait_result != WAIT_OBJECT_0) all_exited = FALSE;
+            }
+            if (all_exited) return TRUE;
+            if (GetTickCount64() >= deadline)
+                return fail(error, capacity, L"Verified Discord processes remained 5 seconds after targeted close; launch was refused.");
+            Sleep(20);
+        }
+    }
+}
+
 static BOOL wait_op(void *unused, const DiscordRestartRequest *request, DiscordInstallation *installation, wchar_t *error, size_t capacity) {
-    (void)unused; ULONGLONG start = GetTickCount64();
+    ULONGLONG start = GetTickCount64();
+    (void)unused;
     for (;;) {
-        if (cancel_requested(request->cancel_event)) return fail(error, capacity, L"Cancelled while waiting for Discord exit.");
         BOOL all_exited = TRUE;
-        for (size_t i = 0; i < installation->process_count; ++i) if (WaitForSingleObject(installation->processes[i], 0) != WAIT_OBJECT_0) all_exited = FALSE;
+        if (cancel_requested(request->cancel_event)) return fail(error, capacity, L"Discord exit wait cancelled.");
+        for (size_t i = 0; i < installation->process_count; ++i) {
+            DWORD result = WaitForSingleObject(installation->processes[i], 0);
+            if (result != WAIT_OBJECT_0) all_exited = FALSE;
+        }
         if (all_exited) return TRUE;
-        if (GetTickCount64() - start >= request->exit_timeout_ms) return fail(error, capacity, L"Discord did not exit gracefully before timeout; no forced termination performed.");
+        if (GetTickCount64() - start >= request->exit_timeout_ms) {
+            if (request->allow_force_quit_on_timeout)
+                return force_quit_pinned_processes(request, installation, error, capacity);
+            return fail(error, capacity, L"Discord did not exit gracefully before timeout; no forced termination performed.");
+        }
         Sleep(20);
     }
 }

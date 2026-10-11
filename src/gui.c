@@ -17,7 +17,7 @@ typedef enum { WORK_CONNECT, WORK_SCRIPT, WORK_ORIGINAL, WORK_ORB_STOP, WORK_RES
 typedef struct Gui Gui;
 typedef struct {
     AppSettings settings; wchar_t directory[DISCORD_PATH_CAP]; HANDLE cancel; HWND notify;
-    volatile LONG *post_failed; WorkKind kind; OrbPayload reviewed; char orb_key[33];
+    volatile LONG *post_failed; WorkKind kind; OrbPayload reviewed; char orb_key[33]; BOOL restart_force_quit;
 } Work;
 typedef struct { WorkKind kind; CdpResult cdp; DiscordRestartResult restart; BOOL discord_found; size_t process_count; } WorkResult;
 struct Gui {
@@ -27,7 +27,7 @@ struct Gui {
     HINSTANCE instance; HWND window, title, subtitle, group, status, payload, activity, logs, footer;
     HWND buttons[7], original_button, orb_stop_button, about_button; HFONT font, title_font; UINT dpi;
     AppSettings settings; wchar_t directory[DISCORD_PATH_CAP], log_text[LOG_CAP], process_text[128], endpoint_text[80], renderer_text[80], last_success[80], last_error[512];
-    BOOL busy, close_pending, logs_visible; OrbPayload approved; wchar_t original_path[DISCORD_PATH_CAP]; HANDLE thread, cancel; volatile LONG post_failed;
+    BOOL busy, close_pending, logs_visible, restart_force_quit; OrbPayload approved; wchar_t original_path[DISCORD_PATH_CAP]; HANDLE thread, cancel; volatile LONG post_failed;
 };
 static void render_state(Gui *gui);
 static void begin_work(Gui *gui, WorkKind kind);
@@ -141,15 +141,23 @@ static void update_fonts(Gui *gui) {
     if (old_title) DeleteObject(old_title);
 }
 static INT_PTR CALLBACK confirm_dialog(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
-    (void)lparam;
+    BOOL *force_quit = (BOOL *)GetWindowLongPtrW(dialog, DWLP_USER);
     if (message == WM_INITDIALOG) {
-        SetDlgItemTextW(dialog, ID_CONFIRM_TEXT, L"Discord will close and reopen with loopback-only local debugging enabled (127.0.0.1). Active calls or streams may be interrupted. Orb will not start automatically.\nDo you want to restart and connect?");
+        force_quit = (BOOL *)lparam;
+        SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)force_quit);
+        if (force_quit) *force_quit = FALSE;
+        CheckDlgButton(dialog, ID_RESTART_FORCE_CHECK, BST_CHECKED);
+        SetDlgItemTextW(dialog, ID_CONFIRM_TEXT, L"Discord will close and reopen with loopback-only local debugging enabled (127.0.0.1). Active calls or streams may be interrupted. If Discord remains in the tray after 10 seconds, the checked option permits force-closing only verified processes from this selected Discord installation. No scripts will run.");
 #ifdef ORB_UI_TEST_MOCK
         SetWindowTextW(dialog, L"Restart Discord to connect? (MOCK TEST)");
 #endif
         SendMessageW(dialog, DM_SETDEFID, IDCANCEL, 0); SetFocus(GetDlgItem(dialog, IDCANCEL)); return FALSE;
     }
-    if (message == WM_COMMAND && (LOWORD(wparam) == IDOK || LOWORD(wparam) == IDCANCEL)) { EndDialog(dialog, LOWORD(wparam)); return TRUE; }
+    if (message == WM_COMMAND && (LOWORD(wparam) == IDOK || LOWORD(wparam) == IDCANCEL)) {
+        if (LOWORD(wparam) == IDOK && force_quit)
+            *force_quit = IsDlgButtonChecked(dialog, ID_RESTART_FORCE_CHECK) == BST_CHECKED;
+        EndDialog(dialog, LOWORD(wparam)); return TRUE;
+    }
     if (message == WM_CLOSE) { EndDialog(dialog, IDCANCEL); return TRUE; }
     return FALSE;
 }
@@ -311,7 +319,7 @@ static DWORD WINAPI worker(void *parameter) {
     DiscordInstallation *installation = calloc(1, sizeof(*installation)); wchar_t error[512];
     if (installation) { result->discord_found = discord_discover(work->settings.discord_executable, installation, error, 512); result->process_count = installation->process_count; discord_release(installation); free(installation); }
     if (work->kind == WORK_RESTART) {
-        DiscordRestartRequest request = {TRUE, work->settings.discord_executable, work->directory, work->settings.port, work->settings.exit_timeout_ms, work->settings.endpoint_timeout_ms, work->cancel};
+        DiscordRestartRequest request = {TRUE, work->settings.discord_executable, work->directory, work->settings.port, work->settings.exit_timeout_ms, work->settings.endpoint_timeout_ms, work->cancel, work->restart_force_quit};
 #ifdef ORB_UI_TEST_MOCK
         /* This test-build-only injection is absent from the production binary. */
         wchar_t selected_stage[16]; MockRestart mock = {0};
@@ -347,7 +355,7 @@ static void begin_work(Gui *gui, WorkKind kind) {
     if (!helper_present(gui)) { orb_payload_close(&gui->approved); return; }
     Work *work = calloc(1, sizeof(*work)); gui->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!work || !gui->cancel) { free(work); if (gui->cancel) CloseHandle(gui->cancel); gui->cancel = NULL; orb_payload_close(&gui->approved); append_log(gui, L"Could not start operation."); return; }
-    work->settings = gui->settings; wcscpy(work->directory, gui->directory); work->cancel = gui->cancel; work->notify = gui->window; work->post_failed = &gui->post_failed; work->kind = kind;
+    work->settings = gui->settings; wcscpy(work->directory, gui->directory); work->cancel = gui->cancel; work->notify = gui->window; work->post_failed = &gui->post_failed; work->kind = kind; work->restart_force_quit = kind == WORK_RESTART ? gui->restart_force_quit : FALSE;
     work->reviewed = gui->approved; memset(&gui->approved, 0, sizeof(gui->approved));
     if(kind==WORK_ORIGINAL){
         if(!gui->model.connected || gui->model.start_locked){orb_payload_close(&work->reviewed);free(work);CloseHandle(gui->cancel);gui->cancel=NULL;append_log(gui,L"Start refused: connect first or restart to reset unknown renderer state.");return;}
@@ -495,7 +503,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         if(LOWORD(wparam)==ID_TABS){gui->showing_details=!gui->showing_details;render_state(gui);return 0;}
         if(LOWORD(wparam)==ID_PRIMARY&&!gui->busy){
             if(gui->model.state==DISCONNECTED||gui->model.state==ERROR){
-                INT_PTR consent=DialogBoxParamW(gui->instance,MAKEINTRESOURCEW(IDD_RESTART),window,confirm_dialog,0);
+                gui->restart_force_quit=FALSE; INT_PTR consent=DialogBoxParamW(gui->instance,MAKEINTRESOURCEW(IDD_RESTART),window,confirm_dialog,(LPARAM)&gui->restart_force_quit);
                 if(consent==IDOK)begin_work(gui,WORK_RESTART);else append_log(gui,L"Restart cancelled; Discord untouched.");
             }else if(gui->model.state==READY){
                 if(!helper_present(gui)||!orb_start_confirm(&gui->model))return 0;
@@ -538,7 +546,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             } else append_log(gui,L"Original Orb review closed; nothing sent.");
             orb_payload_close(&review->payload); free(review);
         }
-        else if (LOWORD(wparam)==ID_RESTART) { INT_PTR consent=DialogBoxParamW(gui->instance,MAKEINTRESOURCEW(IDD_RESTART),window,confirm_dialog,0); if(consent==IDOK)begin_work(gui,WORK_RESTART);else append_log(gui,L"Restart cancelled; Discord untouched."); }
+        else if (LOWORD(wparam)==ID_RESTART) { gui->restart_force_quit=FALSE; INT_PTR consent=DialogBoxParamW(gui->instance,MAKEINTRESOURCEW(IDD_RESTART),window,confirm_dialog,(LPARAM)&gui->restart_force_quit); if(consent==IDOK)begin_work(gui,WORK_RESTART);else append_log(gui,L"Restart cancelled; Discord untouched."); }
         else if (LOWORD(wparam)==ID_SETTINGS) DialogBoxParamW(gui->instance,MAKEINTRESOURCEW(IDD_SETTINGS),window,settings_dialog,(LPARAM)gui);
         else if (LOWORD(wparam)==ID_LOAD) {
             wchar_t *file=calloc(DISCORD_PATH_CAP,sizeof(wchar_t)); if(!file)return 0; OPENFILENAMEW open={0};open.lStructSize=sizeof(open);open.hwndOwner=window;open.lpstrFilter=L"JavaScript files (*.js)\0*.js\0All files\0*.*\0\0";open.lpstrFile=file;open.nMaxFile=DISCORD_PATH_CAP;open.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|OFN_EXPLORER;

@@ -1,6 +1,12 @@
-## v1.0.2 development status — not released
+## v1.0.3 development status — not released
 
-The latest public release remains v1.0.1. The confirmed v1.0.1 defect was a post-update path mismatch: Squirrel selected a newer app-* executable, while the controller kept probing the pre-update image. v1.0.2 development permits only same-channel/same-root version migration and binds the CDP helper and post-handshake ownership check to the newly discovered executable.
+Latest public release: v1.0.2. Orb v1.0.3 adds an explicitly described, checked-by-default consent option for a targeted Discord tray-exit fallback. If graceful window close has not exited after 10 seconds, the fallback revalidates and terminates only processes pinned during discovery for the selected installation. It confirms those processes exited within 5 seconds, then uses the existing port check, validated Squirrel Update.exe launch and CDP renderer handshake. Cancellation, identity changes, a port conflict or unconfirmed exit prevents launch. Force-closing can interrupt calls or streams and may lose unsaved Discord activity; Cancel remains the dialog default.
+
+Local v1.0.3 validation: clean native Windows build; process tests 72/72; state tests 50/50; GUI/helper PE versions 1.0.3. One source-linked production restart harness run reported status 0 through stage 6, shutdown attempted/requested, launch complete and renderer handshake verified. The relaunched Stable client owned loopback port 9223 and GET /json/version returned HTTP 200. The physical GUI dialog/button/checkbox path was not clicked or verified, and these local artifacts are not a published release. No Quest or JavaScript payload ran. See `docs/test-results.md` for details.
+
+## v1.0.2 development status (historical pre-release notes)
+
+At the time of these notes, the latest public release was v1.0.1. The confirmed v1.0.1 defect was a post-update path mismatch: Squirrel selected a newer app-* executable, while the controller kept probing the pre-update image. v1.0.2 development permits only same-channel/same-root version migration and binds the CDP helper and post-handshake ownership check to the newly discovered executable.
 
 A direct, approved Stable Update.exe recovery was observed to exit 0, start app-1.0.9261\Discord.exe with loopback CDP flags, and expose /json/version with HTTP 200. This is a command-line updater recovery, not live acceptance of the Orb GUI restart button or its native renderer handshake. No Quest/JavaScript payload was run.
 
