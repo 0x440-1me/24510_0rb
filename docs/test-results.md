@@ -1,5 +1,13 @@
 # Validation status
 
+## Live updater recovery and v1.0.2 validation (2026-10-11)
+
+One approved direct invocation of the installed Stable Update.exe was observed after a partial shutdown. It returned exit code 0 and selected app-1.0.9261\Discord.exe from the prior app-1.0.9260 installation. Six Stable Discord processes appeared in session 1; the single listener on 9223 was loopback and owned by Stable Discord; GET /json/version returned HTTP 200 (Chrome/148.0.7778.280, protocol 1.3). This proves the installed Squirrel launch path and endpoint response only. The Orb GUI button and its native CDP renderer handshake were not exercised.
+
+The v1.0.1 source defect was confirmed: after Squirrel selected the new app version, connect_op rediscovered and passed the old versioned executable path to the CDP helper. The v1.0.2 fix uses unconfigured discovery after launch, permits migration only when both validated updater paths resolve to the same installation/channel, targets the fresh executable, and confirms the same listener owner after handshake. No Quest or JavaScript payload ran.
+
+The isolated native build in bin/review-v102-20261011 completed with exit code 0. The offline process suite recorded TOTAL passed=71 failed=0, including ten same-installation migration/rejection assertions; the offline state suite recorded STATE_SUMMARY total=50 passed=50 failed=0; the static ribbon verifier recorded RIBBON_VERIFY PASS. The GUI and helper FileVersion and ProductVersion are 1.0.2. git diff --check passed. These checks do not constitute Orb GUI-button acceptance; new hosted CI and a later authorized GUI restart/renderer handshake remain outstanding.
+
 ## Local v1.0.1 restart hotfix (2026-10-11)
 The isolated native Windows build in `bin/build-hotfix-v101-20261011` completed successfully. The synthetic restart/process suite recorded TOTAL passed=61 failed=0, including nine pure updater/path tests (eight Stage 1 cases and one case-insensitive APP- case). The offline state suite recorded STATE_SUMMARY total=50 passed=50 failed=0. The ribbon executable resource verifier recorded RIBBON_VERIFY PASS. No actual Discord restart, Squirrel Update.exe launch, CDP renderer handshake or Quest script execution was performed; this hotfix still needs manual Windows verification and new hosted CI. The official v1.0.0 release and CI are separate evidence and do not verify this hotfix.
 

@@ -54,4 +54,6 @@ BOOL discord_port_available(unsigned short port, const DiscordInstallation *, BO
 BOOL discord_listener_owned(unsigned short port, const DiscordInstallation *, wchar_t *, size_t);
 void discord_release(DiscordInstallation *);
 BOOL discord_build_command(const wchar_t *executable, unsigned short port, wchar_t *output, size_t capacity);
+/* Pure comparison of validated channel updater paths; runtime callers also verify both files canonically. */
+BOOL discord_same_installation_channel(const wchar_t *original_exe, const wchar_t *candidate_exe);
 #endif

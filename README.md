@@ -1,8 +1,8 @@
 # 24510_0rb
 
-**24510_0rb v1.0.0.**
+**24510_0rb v1.0.2 (unreleased development build).**
 
-**Latest public release: v1.0.0; v1.0.1 restart hotfix is under development and is not yet published.**
+**Latest public release: v1.0.1. v1.0.2 is under development and is not yet published.**
 
 24510_0rb is a native C11 / Win32 controller for a consent-based Discord Quest experiment. It connects to an approved local renderer through CDP, reviews exact local JavaScript bytes, and presents bounded, privacy-conscious status. No Node.js, Python, Electron or Visual Studio runtime is required.
 
@@ -41,7 +41,7 @@ Nothing auto-starts on launch, Connect, restart, or file selection. Rate limits 
 
 Mock-mode screenshots and synthetic tests do not validate live Discord behavior or real-account results.
 
-The v1.0.1 restart hotfix under development uses approved Discord Update.exe with --processStart, forwards the loopback debugging arguments, and validates updater availability before asking Discord to close. It has not been tested with a real Discord account or live restart.
+v1.0.1 uses the approved Discord Update.exe --processStart path and validates the updater before shutdown. A later one-shot direct updater recovery on the real Stable installation returned exit 0, launched app-1.0.9261\Discord.exe with the requested loopback CDP flags, and exposed /json/version with HTTP 200. This verifies the installed updater command path only; the Orb GUI restart button and its native renderer handshake have not passed live acceptance. v1.0.2 development fixes the post-update version mismatch by rediscovering the running image and accepting only the same validated installation channel/root.
 
 
 

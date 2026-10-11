@@ -1,6 +1,6 @@
 1 VERSIONINFO
- FILEVERSION 1,0,1,0
- PRODUCTVERSION 1,0,1,0
+ FILEVERSION 1,0,2,0
+ PRODUCTVERSION 1,0,2,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -13,9 +13,9 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "0x440_1me\0"
    VALUE "FileDescription", "24510_0rb Discord Quest Runner\0"
-   VALUE "FileVersion", "1.0.1\0"
+   VALUE "FileVersion", "1.0.2\0"
    VALUE "ProductName", "24510_0rb\0"
-   VALUE "ProductVersion", "1.0.1\0"
+   VALUE "ProductVersion", "1.0.2\0"
    VALUE "LegalCopyright", "Native/support MIT; original separately attributed\0"
   END
  END

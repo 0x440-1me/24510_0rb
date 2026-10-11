@@ -1,9 +1,15 @@
 # Changelog
 
-## [1.0.1] — Unreleased
+## [1.0.2] — Unreleased
+
+- Post-launch verification now discovers the current Discord image after Squirrel updates and accepts a version change only when the canonical Update.exe path confirms the same installation root and channel.
+- The CDP helper receives the fresh executable path; listener ownership is rechecked against the same process across the renderer handshake.
+- Added pure Stable/PTB/Canary migration and rejection tests. The observed direct updater recovery succeeded, but the Orb GUI restart button and native renderer handshake still need live acceptance; no Quest or JavaScript payload was run.
+
+## [1.0.1] — Released 2026-10-11
 
 - Restart now uses the approved Squirrel Update.exe --processStart path and forwards loopback CDP startup arguments instead of launching versioned Discord.exe directly.
-- Updater validation runs before Discord shutdown, and failed CreateProcessW startup reports the numeric Windows error; no forced quit is added, exact ownership checks and explicit consent remain. Tests are synthetic; no live restart is claimed.
+- Updater validation runs before Discord shutdown, and failed CreateProcessW startup reports the numeric Windows error; no forced quit is added, exact ownership checks and explicit consent remain. The suite is synthetic; a later direct Update.exe recovery and its limits are recorded under v1.0.2 validation, with no Orb GUI restart or renderer handshake claimed.
 
 ## [1.0.0] — Released 2026-10-11
 

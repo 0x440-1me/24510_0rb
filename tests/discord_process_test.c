@@ -96,6 +96,16 @@ static void state_tests(void) {
     wchar_t short_command[8];
     check(!discord_build_command(L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe", 7733, short_command, 8), "short-buffer-rejected");
     check(!discord_build_command(L"C:\\Fixture\\Discord\\Discord.exe", 7733, command, 512), "non-versioned-path-rejected");
+    check(discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe", L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe"), "same-stable-version-accepted");
+    check(discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-1.0.9260\\Discord.exe", L"C:\\Fixture\\Discord\\app-1.0.9261\\Discord.exe"), "stable-version-migration-accepted");
+    check(discord_same_installation_channel(L"C:\\Fixture\\DiscordPTB\\app-2.3.4\\DiscordPTB.exe", L"C:\\Fixture\\DiscordPTB\\app-2.3.5\\DiscordPTB.exe"), "ptb-version-migration-accepted");
+    check(discord_same_installation_channel(L"C:\\Fixture\\DiscordCanary\\app-4.5.6\\DiscordCanary.exe", L"C:\\Fixture\\DiscordCanary\\app-4.5.7\\DiscordCanary.exe"), "canary-version-migration-accepted");
+    check(discord_same_installation_channel(L"C:\\Fixture\\DiscordPTB\\app-2.3.4\\Discord.exe", L"C:\\Fixture\\DiscordPTB\\app-2.3.5\\DiscordPTB.exe"), "ptb-discord-exe-fallback-migration-accepted");
+    check(!discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe", L"C:\\Fixture\\DiscordPTB\\app-2.3.4\\DiscordPTB.exe"), "cross-channel-migration-rejected");
+    check(!discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe", L"D:\\Fixture\\Discord\\app-1.2.4\\Discord.exe"), "different-root-migration-rejected");
+    check(!discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-1.2.3\\..\\Discord.exe", L"C:\\Fixture\\Discord\\app-1.2.4\\Discord.exe"), "migration-traversal-rejected");
+    check(!discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-1.2.3\\Discord.exe", L"C:\\Fixture\\Discord\\app-1.2.4\\Discord.exe\""), "migration-quoted-path-rejected");
+    check(!discord_same_installation_channel(L"C:\\Fixture\\Discord\\app-x\\Discord.exe", L"C:\\Fixture\\Discord\\app-1.2.4\\Discord.exe"), "migration-invalid-version-rejected");
 }
 static void port_tests(void) {
     WSADATA data; if (WSAStartup(MAKEWORD(2,2), &data)) { check(FALSE, "socket-fixture-startup"); return; }

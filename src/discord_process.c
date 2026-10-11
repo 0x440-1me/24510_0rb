@@ -183,8 +183,9 @@ static BOOL selected_owner(const DiscordInstallation *installation, DWORD owner)
         if (installation->pids[i] == owner && image_matches(installation->processes[i], owner, installation->executable)) return TRUE;
     return FALSE;
 }
-static BOOL inspect_port(unsigned short port, const DiscordInstallation *installation, BOOL require_free, BOOL *found, wchar_t *error, size_t capacity) {
+static BOOL inspect_port(unsigned short port, const DiscordInstallation *installation, BOOL require_free, BOOL *found, DWORD *owner_pid, wchar_t *error, size_t capacity) {
     if (found) *found = FALSE;
+    if (owner_pid) *owner_pid = 0;
     if (!port) return fail(error, capacity, L"Invalid debugging port.");
     for (unsigned family = 0; family < 2; ++family) {
         DWORD size = 0, af = family ? AF_INET6 : AF_INET;
@@ -210,6 +211,10 @@ static BOOL inspect_port(unsigned short port, const DiscordInstallation *install
             }
             if (ntohs((u_short)raw_port) == port) {
                 if (found) *found = TRUE;
+                if (owner_pid) {
+                    if (*owner_pid && *owner_pid != owner) { allowed = FALSE; break; }
+                    *owner_pid = owner;
+                }
                 if (require_free || !loopback || !selected_owner(installation, owner)) { allowed = FALSE; break; }
             }
         }
@@ -219,11 +224,11 @@ static BOOL inspect_port(unsigned short port, const DiscordInstallation *install
     return TRUE;
 }
 BOOL discord_port_available(unsigned short port, const DiscordInstallation *installation, BOOL require_free, wchar_t *error, size_t capacity) {
-    return inspect_port(port, installation, require_free, NULL, error, capacity);
+    return inspect_port(port, installation, require_free, NULL, NULL, error, capacity);
 }
 BOOL discord_listener_owned(unsigned short port, const DiscordInstallation *installation, wchar_t *error, size_t capacity) {
-    BOOL found = FALSE;
-    if (!inspect_port(port, installation, FALSE, &found, error, capacity)) return FALSE;
+    BOOL found = FALSE; DWORD owner = 0;
+    if (!inspect_port(port, installation, FALSE, &found, &owner, error, capacity)) return FALSE;
     return found ? TRUE : fail(error, capacity, L"No selected Discord listener exists yet.");
 }
 
@@ -326,6 +331,12 @@ static BOOL discord_updater_path(const wchar_t *selected_exe, wchar_t *updater, 
     wmemcpy(updater + root_len, suffix, suffix_len + 1);
     return TRUE;
 }
+BOOL discord_same_installation_channel(const wchar_t *original_exe, const wchar_t *candidate_exe) {
+    wchar_t original_updater[DISCORD_PATH_CAP], candidate_updater[DISCORD_PATH_CAP];
+    return discord_updater_path(original_exe, original_updater, DISCORD_PATH_CAP) &&
+           discord_updater_path(candidate_exe, candidate_updater, DISCORD_PATH_CAP) &&
+           !_wcsicmp(original_updater, candidate_updater);
+}
 static BOOL verify_updater_for_selected(const wchar_t *selected_exe, wchar_t *error, size_t capacity) {
     const wchar_t *message = L"Discord Update.exe unavailable or outside approved installation; restart cannot continue.";
     wchar_t updater[DISCORD_PATH_CAP], real_path[DISCORD_PATH_CAP];
@@ -335,6 +346,13 @@ static BOOL verify_updater_for_selected(const wchar_t *selected_exe, wchar_t *er
     BOOL valid = !_wcsicmp(real_path, updater);
     CloseHandle(handle);
     return valid ? TRUE : fail(error, capacity, message);
+}
+static BOOL authorize_post_launch_candidate(const wchar_t *original_exe, const wchar_t *candidate_exe, wchar_t *error, size_t capacity) {
+    if (!discord_same_installation_channel(original_exe, candidate_exe))
+        return fail(error, capacity, L"Discord restarted in a different installation or channel; renderer verification refused.");
+    if (!verify_updater_for_selected(original_exe, error, capacity) ||
+        !verify_updater_for_selected(candidate_exe, error, capacity)) return FALSE;
+    return TRUE;
 }
 BOOL discord_build_command(const wchar_t *executable, unsigned short port, wchar_t *output, size_t capacity) {
     if (!executable || !output || !capacity || !port) return FALSE;
@@ -389,27 +407,55 @@ static BOOL connect_op(void *unused, const DiscordRestartRequest *request, Disco
         DWORD remaining = request->endpoint_timeout_ms - (DWORD)elapsed;
         DiscordInstallation *fresh = calloc(1, sizeof(*fresh));
         if (!fresh) return fail(error, capacity, L"Out of memory verifying renderer ownership.");
-        BOOL inspected = discord_discover(installation->executable, fresh, error, capacity);
-        BOOL owned = inspected && fresh->process_count != 0 && discord_listener_owned(request->port, fresh, error, capacity);
-        discord_release(fresh); free(fresh);
-        if (!inspected) return FALSE;
-        if (!owned) { Sleep(100); continue; }
-        CdpRequest attempt = {request->app_directory, NULL, request->port, CDP_CONNECT, remaining < 1500 ? remaining : 1500, request->cancel_event, installation->executable, NULL, NULL};
-        CdpResult *result = calloc(1, sizeof(*result));
-        if (!result) return fail(error, capacity, L"Out of memory connecting renderer.");
-        cdp_run(&attempt, result);
-        BOOL ok = result->status == CDP_FINISHED && result->child_exit_code == 0;
-        free(result);
-        if (ok) {
-            fresh = calloc(1, sizeof(*fresh));
-            if (!fresh) return fail(error, capacity, L"Out of memory rechecking renderer ownership.");
-            inspected = discord_discover(installation->executable, fresh, error, capacity);
-            owned = inspected && fresh->process_count != 0 && discord_listener_owned(request->port, fresh, error, capacity);
+        BOOL inspected = discord_discover(NULL, fresh, error, capacity);
+        if (!inspected) { discord_release(fresh); free(fresh); return FALSE; }
+        if (!fresh->executable[0]) { discord_release(fresh); free(fresh); Sleep(100); continue; }
+        if (!discord_same_installation_channel(installation->executable, fresh->executable)) {
             discord_release(fresh); free(fresh);
-            if (owned) return TRUE;
-            if (!inspected) return FALSE;
+            return fail(error, capacity, L"Discord restarted in a different installation or channel; renderer verification refused.");
         }
-        Sleep(100);
+        if (!fresh->process_count) { discord_release(fresh); free(fresh); Sleep(100); continue; }
+        if (!authorize_post_launch_candidate(installation->executable, fresh->executable, error, capacity)) {
+            discord_release(fresh); free(fresh); return FALSE;
+        }
+        BOOL found = FALSE; DWORD listener_owner = 0;
+        if (!inspect_port(request->port, fresh, FALSE, &found, &listener_owner, error, capacity)) {
+            discord_release(fresh); free(fresh); return FALSE;
+        }
+        if (!found) { discord_release(fresh); free(fresh); Sleep(100); continue; }
+        CdpRequest attempt = {request->app_directory, NULL, request->port, CDP_CONNECT,
+            remaining < 1500 ? remaining : 1500, request->cancel_event, fresh->executable, NULL, NULL};
+        CdpResult *result = calloc(1, sizeof(*result));
+        if (!result) { discord_release(fresh); free(fresh); return fail(error, capacity, L"Out of memory connecting renderer."); }
+        cdp_run(&attempt, result);
+        BOOL handshake = result->status == CDP_FINISHED && result->child_exit_code == 0;
+        free(result);
+        if (handshake) {
+            DiscordInstallation *confirmed = calloc(1, sizeof(*confirmed));
+            if (!confirmed) { discord_release(fresh); free(fresh); return fail(error, capacity, L"Out of memory rechecking renderer ownership."); }
+            BOOL post_inspected = discord_discover(NULL, confirmed, error, capacity);
+            if (!post_inspected) {
+                discord_release(confirmed); free(confirmed); discord_release(fresh); free(fresh); return FALSE;
+            }
+            if (!confirmed->process_count) {
+                discord_release(confirmed); free(confirmed); discord_release(fresh); free(fresh); Sleep(100); continue;
+            }
+            if (!authorize_post_launch_candidate(installation->executable, confirmed->executable, error, capacity)) {
+                discord_release(confirmed); free(confirmed); discord_release(fresh); free(fresh); return FALSE;
+            }
+            BOOL confirmed_listener = FALSE; DWORD confirmed_owner = 0;
+            if (!inspect_port(request->port, confirmed, FALSE, &confirmed_listener, &confirmed_owner, error, capacity)) {
+                discord_release(confirmed); free(confirmed); discord_release(fresh); free(fresh); return FALSE;
+            }
+            discord_release(confirmed); free(confirmed);
+            if (!confirmed_listener) { discord_release(fresh); free(fresh); Sleep(100); continue; }
+            if (confirmed_owner != listener_owner) {
+                discord_release(fresh); free(fresh);
+                return fail(error, capacity, L"Discord process identity changed during renderer handshake; verification refused.");
+            }
+            discord_release(fresh); free(fresh); return TRUE;
+        }
+        discord_release(fresh); free(fresh); Sleep(100);
     }
 }
 static void release_op(void *unused, DiscordInstallation *installation) { (void)unused; discord_release(installation); }
