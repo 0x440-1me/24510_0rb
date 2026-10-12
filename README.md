@@ -1,8 +1,8 @@
 # 24510_0rb
 
-**24510_0rb v1.0.3 (unreleased development build).**
+**24510_0rb v1.0.3 — latest public Windows x64 release (October 11, 2026).**
 
-**Latest public release: v1.0.2. v1.0.3 is under development and is not yet published.**
+[Download v1.0.3](https://github.com/0x440-1me/24510_0rb/releases/tag/v1.0.3) · [All releases](https://github.com/0x440-1me/24510_0rb/releases) · [Changelog](CHANGELOG.md)
 
 24510_0rb is a native C11 / Win32 controller for a consent-based Discord Quest experiment. It connects to an approved local renderer through CDP, reviews exact local JavaScript bytes, and presents bounded, privacy-conscious status. No Node.js, Python, Electron or Visual Studio runtime is required.
 
@@ -33,7 +33,7 @@
 
 *Mock-mode test captures; not live Discord validation.*
 
-## v1.0.0 behavior
+## v1.x behavior
 
 The four primary actions guide the run lifecycle. **Restart Discord to Connect** always asks for explicit confirmation. **Start Orb** requires explicit per-run consent; the in-app Discord page must be ready at `/quest-home` and remain open while it runs. **Stop Orb** makes a best-effort cooperative request and cannot guarantee cleanup or rollback. **All completed!** appears only after a reliable eligible-quest scan; **Retry** performs another read-only scan.
 
@@ -41,11 +41,7 @@ Nothing auto-starts on launch, Connect, restart, or file selection. Rate limits 
 
 Mock-mode screenshots and synthetic tests do not validate live Discord behavior or real-account results.
 
-v1.0.1 uses the approved Discord Update.exe --processStart path and validates the updater before shutdown. v1.0.2 fixes the post-update version mismatch by rediscovering the running image and accepting only the same validated installation channel/root.
-
-
-
-
+v1.0.1 uses the approved Discord `Update.exe --processStart` path and validates the updater before shutdown. v1.0.2 fixes the post-update version mismatch by rediscovering the running image and accepting only the same validated installation channel/root. **v1.0.3** adds an explicitly disclosed, per-restart consent option to terminate only previously pinned and revalidated Discord processes if graceful shutdown times out. Cancel remains the default dialog action; force-close can interrupt calls, streams or unsaved activity. See [the v1.0.3 change history](CHANGELOG.md#103--released-2026-10-11) and [restart limitations](#restart-with-consent).
 
 Choose **Original Orb (experimental)** to review the bundled original, or
 **Select local .js...** to import a file without console copy/paste. Nothing
@@ -72,22 +68,22 @@ or binary authenticity guarantee is claimed.
 
 ## Download and run
 
-Download from the [latest release](https://github.com/0x440-1me/24510_0rb/releases/latest), or choose [v0.2.0](https://github.com/0x440-1me/24510_0rb/releases/tag/v0.2.0) on the [release page](https://github.com/0x440-1me/24510_0rb/releases). The v0.2.0 workflow produces these release files:
+Download the published **[v1.0.3 Windows x64 release](https://github.com/0x440-1me/24510_0rb/releases/tag/v1.0.3)**, or use the direct release assets:
 
-- `24510_0rb-v0.2.0-windows-x64.zip`
-- `SHA256SUMS.txt`
+- [`24510_0rb-v1.0.3-windows-x64.zip`](https://github.com/0x440-1me/24510_0rb/releases/download/v1.0.3/24510_0rb-v1.0.3-windows-x64.zip)
+- [`SHA256SUMS.txt`](https://github.com/0x440-1me/24510_0rb/releases/download/v1.0.3/SHA256SUMS.txt)
 
-Check the ZIP's SHA-256 against SHA256SUMS.txt, extract it into a writable folder, and run **24510_0rb.exe**. Keep **orb-cdp.exe** beside it and retain the payloads folder. The application selects hello.js at startup and does not run it automatically.
+Check the ZIP's SHA-256 against `SHA256SUMS.txt`, extract it into a writable folder, and run **24510_0rb.exe**. Keep **orb-cdp.exe** beside it and retain the payloads folder. The application selects hello.js at startup and does not run it automatically.
 
-The tag workflow publishes only after its build, tests and package checks pass. See [Issue #2](https://github.com/0x440-1me/24510_0rb/issues/2) for publication and downloaded-release verification records; a build artifact alone is not a published release.
+The public v1.0.3 release is **not a draft or prerelease**. Its [tagged build/publish workflow](https://github.com/0x440-1me/24510_0rb/actions/runs/38151351569) succeeded on October 11, 2026. GitHub reports ZIP SHA-256 `66107f0d6f837d946a7a6be27f317df932c222a29002b0e28d42ee2758252ab0`. Publishing and CI do not independently prove the physical GUI click-through or live behavior of the downloaded binary; see [test scope](docs/test-results.md). Historical v0.2.0 release verification is recorded in [Issue #2](https://github.com/0x440-1me/24510_0rb/issues/2).
 
 ### Requirements
 
-- Windows 10 version 1809 or later, or Windows 11, **x64**. Only the current Windows 11 development VM has live test evidence.
+- Windows 10 version 1809 or later, or Windows 11, **x64**. A local Windows 11 native restart-stage harness passed against installed Discord; Windows 10 and physical GUI click-through remain unverified.
 - An installed Discord stable/PTB/canary client and an authorized local debugging endpoint.
 - No elevated permission is normally needed. The app requests asInvoker execution.
 
-Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The first verified hosted [PR build](https://github.com/0x440-1me/24510_0rb/actions/runs/38005830743) and [feature build](https://github.com/0x440-1me/24510_0rb/actions/runs/38005826992) passed account-free fixtures on Windows Server 2025: native process 52/52, Foundation 37/37 and mock GUI 27/27 with 310 assertions. These runs used GCC 16.2.0 Rev5; prior harmless real-CDP evidence came from a Windows 11 local build with Rev4, not the hosted binaries. See [current Actions](https://github.com/0x440-1me/24510_0rb/actions) and [test results](docs/test-results.md) for scope and provenance.
+Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The v1.0.3 tagged release workflow passed; this does not replace live GUI testing. The first verified hosted [PR build](https://github.com/0x440-1me/24510_0rb/actions/runs/38005830743) and [feature build](https://github.com/0x440-1me/24510_0rb/actions/runs/38005826992) passed account-free fixtures on Windows Server 2025: native process 52/52, Foundation 37/37 and mock GUI 27/27 with 310 assertions. These runs used GCC 16.2.0 Rev5; prior harmless real-CDP evidence came from a Windows 11 local build with Rev4, not the hosted binaries. See [current Actions](https://github.com/0x440-1me/24510_0rb/actions) and [test results](docs/test-results.md) for scope and provenance.
 
 ## Connect
 
@@ -107,7 +103,7 @@ Build from source with MSYS2 UCRT64 GCC: see [BUILDING.md](BUILDING.md). The fir
 
 The app selects an approved installation, checks IPv4/IPv6 port ownership, requests ordinary window close and waits up to 10 seconds. The consent dialog has a checked-by-default option to allow force-closing only the originally pinned Discord processes from that selected installation if they remain alive. Uncheck it to require graceful exit. Before terminating each process, Orb rechecks its retained handle, PID and executable image; it then confirms all pinned processes exited within 5 seconds before rechecking the port and launching through the selected installation's updater with loopback-only debugging arguments. A failed identity check, cancellation, occupied port or unconfirmed exit stops the restart. Multiple installed/running channels may require an explicit approved executable in Settings.
 
-Force-closing Discord can interrupt calls or streams and may lose unsaved Discord activity. Cancel is the default dialog action; cancelling during shutdown may leave Discord closed. A failure after shutdown may also leave Discord stopped. The v1.0.3 native production restart path passed one local live harness run: status 0 through the renderer handshake, with the restarted Stable client owning port 9223 and `/json/version` returning HTTP 200. The physical GUI restart button and checkbox interaction were not exercised, and this local evidence does not validate a published binary. No Quest or JavaScript payload ran. Do not use the application to circumvent an execution guard.
+Force-closing Discord can interrupt calls or streams and may lose unsaved Discord activity. Cancel is the default dialog action; cancelling during shutdown may leave Discord closed. A failure after shutdown may also leave Discord stopped. The v1.0.3 native production restart path passed one local live harness run: status 0 through the renderer handshake, with the restarted Stable client owning port 9223 and `/json/version` returning HTTP 200. The physical GUI restart button and checkbox interaction were not exercised, and this local source-linked evidence does not independently validate the downloaded v1.0.3 binary. No Quest or JavaScript payload ran. Do not use the application to circumvent an execution guard.
 
 ## External payloads
 
