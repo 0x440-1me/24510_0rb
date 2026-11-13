@@ -64,6 +64,14 @@ This repo is a study in Discord client internals and quest flow mechanics. It's 
 
 ## changelog
 
+### 2026-11-14 (module drift fix)
+
+- Current Discord builds no longer expose `GuildChannelStore.getSFWDefaultChannel`, so the old fingerprint threw `Could not find GuildChannelStore` and — because all seven modules were resolved up front — aborted every cycle before any quest ran.
+- Module lookup is now two-stage: the historical `exports.<key>` fingerprints first, then a scored scan over every webpack export (and its direct properties) for the method names unique to that store/API object. A drifted module is still used and reported once as a warning.
+- Resolution is lazy and per quest type: `WATCH_VIDEO` needs only the API client, desktop tasks need their store plus the dispatcher, `PLAY_ACTIVITY` needs the API client plus *either* `ChannelStore` or `GuildChannelStore`. A missing module now skips that one quest type instead of stopping the run.
+- `PLAY_ACTIVITY` tries the private-channel path first and falls back to guild voice, so it no longer depends on the guild store existing.
+- New handle `window.__questRunnerDiagnose()` prints how each module resolved (`via: fingerprint|scan`, export path, matched methods) so the next Discord update names the module that moved.
+
 ### 2026-11-14
 
 - Refactor: split the payload into discover → enroll → run → cool-down sections with a per-task strategy table instead of a nested `if/else` chain.

@@ -12,8 +12,9 @@
  *   - stops on its own once no unaccepted quests remain
  *
  * Public handles
- *   window.stopQuestRunner()  — stop after the current quest finishes
- *   window.stopQuestProgram() — stop the whole recurring program
+ *   window.stopQuestRunner()       — stop after the current quest finishes
+ *   window.stopQuestProgram()      — stop the whole recurring program
+ *   window.__questRunnerDiagnose() — report how each internal module resolved
  *
  * Research artifact. For educational use only.
  */
@@ -60,24 +61,102 @@
   ];
 
   /**
-   * Webpack export fingerprints. Each matcher returns the module export or a
-   * falsy value; the first hit wins.
+   * How to locate each internal module.
+   *
+   * `fingerprints` are the historical `exports.<minifiedKey>` shapes. Minified
+   * keys and helper methods churn between Discord builds, so when every
+   * fingerprint misses we fall back to `weights`: a scored scan over every
+   * webpack export (and its direct properties) looking for the method names
+   * that only that store/API object has.
    */
-  const MODULE_MATCHERS = {
-    ApplicationStreamingStore: (exports) =>
-      exports.A?.getStreamerActiveStreamMetadata && exports.A,
+  const MODULE_SPECS = {
+    api: {
+      fingerprints: [
+        (exports) => exports.Bo?.get && exports.Bo?.post && exports.Bo,
+      ],
+      weights: { get: 2, post: 2, put: 1, patch: 1, del: 1 },
+      // Many exports expose get/post; the verb set identifies the REST client,
+      // so use it to break ties.
+      tieBreak: { del: 3, put: 2, patch: 2 },
+      minScore: 4,
+    },
 
-    RunningGameStore: (exports) => exports.Ay?.getRunningGames && exports.Ay,
+    FluxDispatcher: {
+      fingerprints: [(exports) => exports.h?.flushWaitQueue && exports.h],
+      weights: {
+        flushWaitQueue: 4,
+        dispatch: 2,
+        subscribe: 2,
+        unsubscribe: 1,
+      },
+      minScore: 4,
+    },
 
-    QuestsStore: (exports) => exports.A?.getQuest && exports.A,
+    QuestsStore: {
+      fingerprints: [
+        (exports) => exports.A?.getQuest && exports.A,
+        (exports) => exports.AY?.getQuest && exports.AY,
+      ],
+      weights: {
+        getQuest: 4,
+        getQuests: 3,
+        getClaimedQuests: 2,
+        getQuestIDs: 1,
+      },
+      minScore: 4,
+    },
 
-    ChannelStore: (exports) => exports.A?.getAllThreadsForParent && exports.A,
+    RunningGameStore: {
+      fingerprints: [
+        (exports) => exports.Ay?.getRunningGames && exports.Ay,
+        (exports) => exports.A?.getRunningGames && exports.A,
+        (exports) => exports.AY?.getRunningGames && exports.AY,
+      ],
+      weights: { getRunningGames: 4, getGameForPID: 2, getRunningGame: 2 },
+      minScore: 4,
+    },
 
-    GuildChannelStore: (exports) => exports.Ay?.getSFWDefaultChannel && exports.Ay,
+    ApplicationStreamingStore: {
+      fingerprints: [
+        (exports) => exports.A?.getStreamerActiveStreamMetadata && exports.A,
+        (exports) =>
+          exports.Ay?.getStreamerActiveStreamMetadata && exports.Ay,
+      ],
+      weights: {
+        getStreamerActiveStreamMetadata: 5,
+        getActiveStreamForUser: 2,
+        getCurrentUserActiveStream: 2,
+      },
+      minScore: 5,
+    },
 
-    FluxDispatcher: (exports) => exports.h?.flushWaitQueue && exports.h,
+    ChannelStore: {
+      fingerprints: [
+        (exports) => exports.A?.getSortedPrivateChannels && exports.A,
+        (exports) => exports.A?.getAllThreadsForParent && exports.A,
+      ],
+      weights: {
+        getSortedPrivateChannels: 4,
+        getAllThreadsForParent: 2,
+        getChannel: 1,
+      },
+      minScore: 4,
+    },
 
-    api: (exports) => exports.Bo?.get && exports.Bo?.post && exports.Bo,
+    GuildChannelStore: {
+      fingerprints: [
+        (exports) => exports.Ay?.getSFWDefaultChannel && exports.Ay,
+        (exports) => exports.Ay?.getAllGuilds && exports.Ay,
+        (exports) => exports.A?.getAllGuilds && exports.A,
+      ],
+      weights: {
+        getAllGuilds: 4,
+        getSFWDefaultChannel: 3,
+        getChannels: 2,
+        getDefaultChannel: 2,
+      },
+      minScore: 4,
+    },
   };
 
   const HEARTBEAT_EVENT = "QUESTS_SEND_HEARTBEAT_SUCCESS";
@@ -169,8 +248,17 @@
     return webpackRequire;
   }
 
-  function findExport(webpackRequire, name, matcher) {
-    for (const module of Object.values(webpackRequire.c)) {
+  function listModules(webpackRequire) {
+    try {
+      return Object.values(webpackRequire?.c ?? {});
+    } catch {
+      return [];
+    }
+  }
+
+  /** Try the historical fingerprints; null when none of them match. */
+  function findExport(webpackRequire, matcher) {
+    for (const module of listModules(webpackRequire)) {
       const exports = module?.exports;
       if (!exports) continue;
 
@@ -182,19 +270,192 @@
       }
     }
 
-    throw new Error(`Could not find ${name}`);
+    return null;
   }
 
-  /** Resolve every internal module the runner needs. Called once per cycle. */
-  function loadDiscord() {
-    const webpackRequire = getWebpackRequire();
-    const discord = {};
+  /** Every export plus its direct properties, as scan candidates. */
+  function collectCandidates(webpackRequire) {
+    const candidates = [];
 
-    for (const [name, matcher] of Object.entries(MODULE_MATCHERS)) {
-      discord[name] = findExport(webpackRequire, name, matcher);
+    for (const module of listModules(webpackRequire)) {
+      const exports = module?.exports;
+      if (!exports || typeof exports !== "object") continue;
+
+      candidates.push({ target: exports, path: "exports" });
+
+      let keys;
+      try {
+        keys = Object.keys(exports);
+      } catch {
+        continue;
+      }
+
+      for (const key of keys) {
+        let value;
+        try {
+          value = exports[key];
+        } catch {
+          continue;
+        }
+
+        if (!value) continue;
+        if (typeof value !== "object" && typeof value !== "function") continue;
+
+        candidates.push({ target: value, path: `exports.${key}` });
+      }
     }
 
-    return discord;
+    return candidates;
+  }
+
+  function scoreCandidate(target, weights) {
+    let score = 0;
+    const hits = [];
+
+    for (const [method, weight] of Object.entries(weights)) {
+      let hasMethod = false;
+
+      try {
+        hasMethod = typeof target?.[method] === "function";
+      } catch {
+        hasMethod = false;
+      }
+
+      if (hasMethod) {
+        score += weight;
+        hits.push(method);
+      }
+    }
+
+    return { score, hits };
+  }
+
+  /** Report each drift or missing module once, not once per cycle. */
+  const reportedOnce = new Set();
+
+  function warnOnce(key, message) {
+    if (reportedOnce.has(key)) return;
+    reportedOnce.add(key);
+    warn(message);
+  }
+
+  function resolveModule(name, scanState) {
+    const spec = MODULE_SPECS[name];
+
+    if (!spec) throw new Error(`Unknown module: ${name}`);
+
+    for (const fingerprint of spec.fingerprints) {
+      const found = findExport(scanState.webpackRequire, fingerprint);
+      if (found) {
+        return { value: found, via: "fingerprint", path: name, hits: [] };
+      }
+    }
+
+    if (!scanState.candidates) {
+      scanState.candidates = collectCandidates(scanState.webpackRequire);
+    }
+
+    let best = null;
+
+    for (const candidate of scanState.candidates) {
+      const { score, hits } = scoreCandidate(candidate.target, spec.weights);
+      if (score < spec.minScore) continue;
+
+      const tieScore = spec.tieBreak
+        ? scoreCandidate(candidate.target, spec.tieBreak).score
+        : 0;
+
+      const better =
+        !best ||
+        score > best.score ||
+        (score === best.score && tieScore > best.tieScore);
+
+      if (better) best = { ...candidate, score, tieScore, hits };
+    }
+
+    if (!best) {
+      throw new Error(
+        `Could not find ${name}: no webpack export exposes ` +
+          `[${Object.keys(spec.weights).join(", ")}]`,
+      );
+    }
+
+    // The module still works, only its fingerprint is stale; keep running and
+    // say so once so the matcher can be updated later.
+    warnOnce(
+      name,
+      `${name} moved; located by method scan at ${best.path} ` +
+        `(${best.hits.join(", ")}).`,
+    );
+
+    return {
+      value: best.target,
+      via: "scan",
+      path: best.path,
+      hits: best.hits,
+    };
+  }
+
+  /**
+   * Per-cycle module registry. Resolution is lazy on purpose: one stale
+   * fingerprint should only disable the quest types that need that module,
+   * never the whole runner.
+   */
+  function createDiscord() {
+    const scanState = { webpackRequire: getWebpackRequire(), candidates: null };
+    const entries = new Map();
+
+    const entryFor = (name) => {
+      if (!entries.has(name)) entries.set(name, resolveModule(name, scanState));
+      return entries.get(name);
+    };
+
+    return {
+      require(name) {
+        return entryFor(name).value;
+      },
+
+      /** Null instead of throwing, for modules only some quest types need. */
+      tryRequire(name) {
+        try {
+          return entryFor(name).value;
+        } catch (error) {
+          warnOnce(`missing:${name}`, error.message);
+          return null;
+        }
+      },
+
+      describe(name) {
+        try {
+          const entry = entryFor(name);
+          return {
+            ok: true,
+            via: entry.via,
+            path: entry.path,
+            methods: entry.hits,
+          };
+        } catch (error) {
+          return { ok: false, error: error.message };
+        }
+      },
+    };
+  }
+
+  /**
+   * Resolve the modules a strategy needs. Missing ones are returned instead of
+   * thrown, so a single drifted module disables one quest type only.
+   */
+  function loadModules(discord, names) {
+    const modules = {};
+    const missing = [];
+
+    for (const name of names) {
+      const value = discord.tryRequire(name);
+      if (value) modules[name] = value;
+      else missing.push(name);
+    }
+
+    return { modules, missing };
   }
 
   // ============================================================
@@ -215,7 +476,7 @@
     questFetchInFlight = (async () => {
       while (true) {
         try {
-          const response = await discord.api.get({
+          const response = await discord.require("api").get({
             url: "/quests/@me",
             rejectWithError: false,
           });
@@ -292,7 +553,9 @@
     const unfinished = quest?.user_status?.completed_at == null;
     const expiry = Date.parse(quest?.config?.expires_at ?? "");
 
-    return enrolled && unfinished && Number.isFinite(expiry) && expiry > Date.now();
+    return (
+      enrolled && unfinished && Number.isFinite(expiry) && expiry > Date.now()
+    );
   }
 
   function questDisplayName(quest) {
@@ -306,8 +569,8 @@
 
   /**
    * Why an accepted quest is no longer worth polling, or null if it is alive.
-   * Kept byte-compatible with the original payload: a quest without a parseable
-   * expiry reads as "expired" here.
+   * Behaviour matches the original payload: a quest without a parseable expiry
+   * reads as "expired" here.
    */
   function getQuestEndReason(quest) {
     if (!quest) return "removed";
@@ -418,6 +681,13 @@
     const name = questDisplayName(quest);
     const needed = details.secondsNeeded;
 
+    const api = discord.tryRequire("api");
+
+    if (!api) {
+      warn(`WATCH_VIDEO unavailable for ${name}: missing api.`);
+      return "skipped";
+    }
+
     const enrolledAt = Date.parse(quest?.user_status?.enrolled_at ?? "");
     const startedAt = Number.isFinite(enrolledAt) ? enrolledAt : Date.now();
 
@@ -426,7 +696,7 @@
     let stalledTicks = 0;
 
     const postVideoProgress = (timestamp) =>
-      discord.api.post({
+      api.post({
         url: `/quests/${quest.id}/video-progress`,
         body: { timestamp },
       });
@@ -461,7 +731,8 @@
 
       if (!posted && ++stalledTicks > VIDEO_STALL_LIMIT) {
         warn(
-          `${name}: no progress accepted for ${VIDEO_STALL_LIMIT}s, giving up on this quest.`,
+          `${name}: no progress accepted for ${VIDEO_STALL_LIMIT}s, ` +
+            "giving up on this quest.",
         );
         return "stalled";
       }
@@ -482,8 +753,9 @@
 
   async function runDesktopGameQuest(ctx) {
     const { discord, quest, details, pid } = ctx;
-    const { api, RunningGameStore, FluxDispatcher } = discord;
     const name = questDisplayName(quest);
+    const applicationName =
+      quest?.config?.application?.name ?? "Unknown application";
 
     if (!isApp) {
       warn(
@@ -493,8 +765,23 @@
       return "skipped";
     }
 
+    const { modules, missing } = loadModules(discord, [
+      "api",
+      "RunningGameStore",
+      "FluxDispatcher",
+    ]);
+
+    if (missing.length) {
+      warn(
+        `PLAY_ON_DESKTOP unavailable for ${name}: ` +
+          `missing ${missing.join(", ")}.`,
+      );
+      return "skipped";
+    }
+
+    const { api, RunningGameStore, FluxDispatcher } = modules;
+
     const applicationId = quest?.config?.application?.id;
-    const applicationName = quest?.config?.application?.name ?? "Unknown application";
 
     const appResponse = await api.get({
       url: `/applications/public?application_ids=${applicationId}`,
@@ -511,10 +798,15 @@
       appData.name ||
       "unknown.exe";
 
+    const installPath = String(appData.name ?? "").toLowerCase();
+    const remainingMinutes = Math.ceil(
+      (details.secondsNeeded - details.secondsDone) / 60,
+    );
+
     const fakeGame = {
       cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
       exeName,
-      exePath: `C:/Program Files/${String(appData.name ?? "").toLowerCase()}/${exeName}`,
+      exePath: `C:/Program Files/${installPath}/${exeName}`,
       hidden: false,
       isLauncher: false,
       id: applicationId,
@@ -570,10 +862,13 @@
 
       log(
         `Spoofed game to ${applicationName}.`,
-        `Wait ${Math.ceil((details.secondsNeeded - details.secondsDone) / 60)} more minutes.`,
+        `Wait ${remainingMinutes} more minutes.`,
       );
 
-      return await waitForQuestEnd(ctx, () => progress >= details.secondsNeeded);
+      return await waitForQuestEnd(
+        ctx,
+        () => progress >= details.secondsNeeded,
+      );
     } finally {
       uninstall();
     }
@@ -585,14 +880,29 @@
 
   async function runDesktopStreamQuest(ctx) {
     const { discord, quest, details, pid } = ctx;
-    const { ApplicationStreamingStore, FluxDispatcher } = discord;
     const name = questDisplayName(quest);
-    const applicationName = quest?.config?.application?.name ?? "Unknown application";
+    const applicationName =
+      quest?.config?.application?.name ?? "Unknown application";
 
     if (!isApp) {
       warn(`Use Discord desktop for ${name}.`);
       return "skipped";
     }
+
+    const { modules, missing } = loadModules(discord, [
+      "ApplicationStreamingStore",
+      "FluxDispatcher",
+    ]);
+
+    if (missing.length) {
+      warn(
+        `STREAM_ON_DESKTOP unavailable for ${name}: ` +
+          `missing ${missing.join(", ")}.`,
+      );
+      return "skipped";
+    }
+
+    const { ApplicationStreamingStore, FluxDispatcher } = modules;
 
     const realGetStreamerActiveStreamMetadata =
       ApplicationStreamingStore.getStreamerActiveStreamMetadata;
@@ -603,6 +913,10 @@
       progress = readHeartbeatProgress(quest, data, "STREAM_ON_DESKTOP");
       log(`Quest progress: ${progress}/${details.secondsNeeded}`);
     };
+
+    const remainingMinutes = Math.ceil(
+      (details.secondsNeeded - details.secondsDone) / 60,
+    );
 
     try {
       ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({
@@ -615,13 +929,14 @@
 
       log(
         `Spoofed stream to ${applicationName}.`,
-        `Stream any window in VC for ${Math.ceil(
-          (details.secondsNeeded - details.secondsDone) / 60,
-        )} more minutes.`,
+        `Stream any window in VC for ${remainingMinutes} more minutes.`,
       );
       log("At least one other person needs to be in the VC.");
 
-      return await waitForQuestEnd(ctx, () => progress >= details.secondsNeeded);
+      return await waitForQuestEnd(
+        ctx,
+        () => progress >= details.secondsNeeded,
+      );
     } finally {
       ApplicationStreamingStore.getStreamerActiveStreamMetadata =
         realGetStreamerActiveStreamMetadata;
@@ -634,26 +949,52 @@
   // strategy: PLAY_ACTIVITY
   // ============================================================
 
-  /** First private channel, else the first voice channel of any guild. */
-  function findActivityChannelId(discord) {
-    const privateChannelId =
-      discord.ChannelStore.getSortedPrivateChannels?.()?.[0]?.id;
+  /**
+   * First private channel, else the first voice channel of any guild. Both
+   * stores are optional: whichever resolves is used, so a renamed guild store
+   * only costs us the guild fallback instead of the whole quest type.
+   */
+  function findActivityChannelId(modules) {
+    try {
+      const privateChannelId =
+        modules.ChannelStore?.getSortedPrivateChannels?.()?.[0]?.id;
 
-    if (privateChannelId) return privateChannelId;
+      if (privateChannelId) return privateChannelId;
+    } catch {
+      // Store shape changed; fall through to guild channels.
+    }
 
-    const guild = Object.values(
-      discord.GuildChannelStore.getAllGuilds?.() ?? {},
-    ).find((candidate) => candidate?.VOCAL?.length > 0);
+    try {
+      const guild = Object.values(
+        modules.GuildChannelStore?.getAllGuilds?.() ?? {},
+      ).find((candidate) => candidate?.VOCAL?.length > 0);
 
-    return guild?.VOCAL?.[0]?.channel?.id ?? null;
+      return guild?.VOCAL?.[0]?.channel?.id ?? null;
+    } catch {
+      return null;
+    }
   }
 
   async function runActivityQuest(ctx) {
     const { discord, quest, details } = ctx;
-    const { api } = discord;
     const name = questDisplayName(quest);
 
-    const channelId = findActivityChannelId(discord);
+    const { modules, missing } = loadModules(discord, ["api"]);
+
+    if (missing.length) {
+      warn(
+        `PLAY_ACTIVITY unavailable for ${name}: missing ${missing.join(", ")}.`,
+      );
+      return "skipped";
+    }
+
+    const { api } = modules;
+    const channelModules = loadModules(discord, [
+      "ChannelStore",
+      "GuildChannelStore",
+    ]).modules;
+
+    const channelId = findActivityChannelId(channelModules);
 
     if (!channelId) {
       warn(`No voice or private channel available for ${name}.`);
@@ -715,7 +1056,8 @@
     }
 
     log(
-      `${name}: ${details.secondsDone}/${details.secondsNeeded} (${details.taskName})`,
+      `${name}: ${details.secondsDone}/${details.secondsNeeded} ` +
+        `(${details.taskName})`,
     );
 
     let reason;
@@ -784,7 +1126,8 @@
 
   async function acceptAvailableQuest(discord) {
     const acceptLog = (...args) => console.log(ACCEPT_TAG, ...args);
-    const { api, QuestsStore } = discord;
+    const api = discord.require("api");
+    const QuestsStore = discord.tryRequire("QuestsStore");
 
     const response = await api.get({
       url: "/quests/@me",
@@ -877,7 +1220,11 @@
           continue;
         }
 
-        log("Starting quest:", questDisplayName(quest), `(${details.taskName})`);
+        log(
+          "Starting quest:",
+          questDisplayName(quest),
+          `(${details.taskName})`,
+        );
 
         const pid = Math.floor(Math.random() * 30_000) + 1_000;
 
@@ -899,7 +1246,8 @@
 
     log(
       skippedQuestIds.size
-        ? `Quest runner finished. Skipped ${skippedQuestIds.size} unsupported quest(s).`
+        ? "Quest runner finished. " +
+            `Skipped ${skippedQuestIds.size} unsupported quest(s).`
         : "Quest runner finished.",
     );
   }
@@ -920,6 +1268,31 @@
     console.log(`${TAG} Program stop requested.`);
   };
 
+  /**
+   * Report how every internal module resolved. Run this if a Discord update
+   * breaks the payload: the entry that says `ok: false` (or `via: "scan"`)
+   * names the module that moved.
+   */
+  window.__questRunnerDiagnose = () => {
+    let discord;
+
+    try {
+      discord = createDiscord();
+    } catch (error) {
+      errorLog("webpack chunk unavailable:", error);
+      return null;
+    }
+
+    const report = {};
+
+    for (const name of Object.keys(MODULE_SPECS)) {
+      report[name] = discord.describe(name);
+    }
+
+    console.log(`${TAG} module diagnosis`, report);
+    return report;
+  };
+
   // ============================================================
   // main: enroll -> run -> cool down -> repeat
   // ============================================================
@@ -928,7 +1301,7 @@
 
   while (!state.stopProgram) {
     try {
-      const discord = loadDiscord();
+      const discord = createDiscord();
 
       await acceptAvailableQuest(discord);
 
@@ -941,6 +1314,10 @@
       }
 
       errorLog("Quest runner cycle failed:", error);
+
+      if (String(error?.message).includes("Could not find")) {
+        warn("Run window.__questRunnerDiagnose() for the module report.");
+      }
     }
 
     if (state.stopProgram || state.noUnacceptedAvailable) break;
