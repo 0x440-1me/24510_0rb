@@ -64,6 +64,16 @@ This repo is a study in Discord client internals and quest flow mechanics. It's 
 
 ## changelog
 
+### 2026-11-14
+
+- Refactor: split the payload into discover → enroll → run → cool-down sections with a per-task strategy table instead of a nested `if/else` chain.
+- Every 429 path now goes through one `Retry-After` parser instead of three copies; `fetchQuests` keeps the shared in-flight request so concurrent callers do not double-fetch.
+- `PLAY_ON_DESKTOP` / `STREAM_ON_DESKTOP` now wait for the quest to finish (or for a stop) and restore every patched store method in a `finally`. Previously they returned immediately, so the runner re-spoofed the same quest every 10s and left `RunningGameStore.getRunningGames` / `ApplicationStreamingStore.getStreamerActiveStreamMetadata` patched forever.
+- Quests that cannot be driven (browser, no voice channel, unsupported task, stalled video) are added to the skip set, so the runner no longer re-picks them every 10 seconds.
+- `WATCH_VIDEO` stops when the API reports `completed_at`, aborts on `window.stopQuestRunner()`, and gives up after 60s without accepted progress instead of looping forever.
+- `window.__questRunnerRetryAfterMs` is now internal state; the public handles are still `window.stopQuestRunner()` / `window.stopQuestProgram()`.
+- Removed the `delete window.$` side effect and the duplicated "loaded" log per cycle.
+
 ### 2026-09-26
 
 - Added automatic enrollment for available quests before each runner cycle.

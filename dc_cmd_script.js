@@ -1,1733 +1,960 @@
+/*
+ * dc_cmd_script.js — Discord quest runner
+ *
+ * Paste into the Discord desktop client DevTools console.
+ *
+ * What it does
+ *   - loads the Discord webpack module registry and resolves the internal
+ *     stores / dispatcher / HTTP client it needs
+ *   - enrolls one available (unaccepted, unexpired) quest per cycle
+ *   - drives every accepted + active quest using a per-task strategy
+ *   - honours HTTP 429 Retry-After and restarts the cycle after >= 60s
+ *   - stops on its own once no unaccepted quests remain
+ *
+ * Public handles
+ *   window.stopQuestRunner()  — stop after the current quest finishes
+ *   window.stopQuestProgram() — stop the whole recurring program
+ *
+ * Research artifact. For educational use only.
+ */
+
 (async () => {
-    let stopProgram = false;
-    let noUnacceptedAvailable = false;
-    let stopLoopWake = null;
-    window.stopQuestProgram = () => {
-        stopProgram = true;
-        window.stopQuestRunner?.();
-        stopLoopWake?.();
-        console.log("[0x440] Program stop requested.");
+  "use strict";
+
+  // ============================================================
+  // configuration
+  // ============================================================
+
+  const TAG = "[0x440]";
+  const ACCEPT_TAG = "[AUTO-QUEST-ACCEPT]";
+
+  const MIN_CYCLE_DELAY_MS = 60_000;
+  const DEFAULT_RETRY_AFTER_MS = 60_000;
+  const QUEST_CACHE_TTL_MS = 5_000;
+
+  const QUEST_POLL_INTERVAL_MS = 10_000;
+  const BETWEEN_QUESTS_DELAY_MS = 10_000;
+  const UNSUPPORTED_SKIP_DELAY_MS = 1_000;
+
+  const VIDEO_STEP_SECONDS = 7;
+  const VIDEO_MAX_FUTURE_SECONDS = 10;
+  const VIDEO_TICK_MS = 1_000;
+  const VIDEO_STALL_LIMIT = 60;
+
+  const ACTIVITY_HEARTBEAT_MS = 20_000;
+
+  /** Task names we know how to drive, in priority order. */
+  const SUPPORTED_TASK_NAMES = [
+    "WATCH_VIDEO",
+    "WATCH_VIDEO_ON_MOBILE",
+    "PLAY_ON_DESKTOP",
+    "STREAM_ON_DESKTOP",
+    "PLAY_ACTIVITY",
+  ];
+
+  /** Tasks we know about but cannot drive. Used for clearer skip logging. */
+  const KNOWN_UNSUPPORTED_TASK_NAMES = [
+    "ACHIEVEMENT_IN_ACTIVITY",
+    "PLAY_ON_XBOX",
+    "PLAY_ON_PLAYSTATION",
+  ];
+
+  /**
+   * Webpack export fingerprints. Each matcher returns the module export or a
+   * falsy value; the first hit wins.
+   */
+  const MODULE_MATCHERS = {
+    ApplicationStreamingStore: (exports) =>
+      exports.A?.getStreamerActiveStreamMetadata && exports.A,
+
+    RunningGameStore: (exports) => exports.Ay?.getRunningGames && exports.Ay,
+
+    QuestsStore: (exports) => exports.A?.getQuest && exports.A,
+
+    ChannelStore: (exports) => exports.A?.getAllThreadsForParent && exports.A,
+
+    GuildChannelStore: (exports) => exports.Ay?.getSFWDefaultChannel && exports.Ay,
+
+    FluxDispatcher: (exports) => exports.h?.flushWaitQueue && exports.h,
+
+    api: (exports) => exports.Bo?.get && exports.Bo?.post && exports.Bo,
+  };
+
+  const HEARTBEAT_EVENT = "QUESTS_SEND_HEARTBEAT_SUCCESS";
+
+  // ============================================================
+  // state
+  // ============================================================
+
+  const state = {
+    /** Set by window.stopQuestProgram(). */
+    stopProgram: false,
+    /** Set by window.stopQuestRunner(). Consumed by the active quest. */
+    stopRunner: false,
+    /** True once a cycle found nothing left to enroll. Ends the program. */
+    noUnacceptedAvailable: false,
+    /** Retry-After hint carried from a rate-limited call to the next cycle. */
+    retryAfterMs: 0,
+    /** Wakes the inter-cycle delay early when the program is stopped. */
+    loopWake: null,
+  };
+
+  const isApp = typeof DiscordNative !== "undefined";
+
+  // ============================================================
+  // logging
+  // ============================================================
+
+  const log = (...args) => console.log(TAG, ...args);
+  const warn = (...args) => console.warn(TAG, ...args);
+  const errorLog = (...args) => console.error(TAG, ...args);
+
+  // ============================================================
+  // primitives
+  // ============================================================
+
+  const sleep = (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  /** Sleep that window.stopQuestProgram() can cut short. */
+  function interruptibleDelay(milliseconds) {
+    return new Promise((resolve) => {
+      const finish = () => {
+        state.loopWake = null;
+        resolve();
+      };
+
+      const timer = setTimeout(finish, milliseconds);
+
+      state.loopWake = () => {
+        clearTimeout(timer);
+        finish();
+      };
+    });
+  }
+
+  /**
+   * Normalise a Discord 429 payload into a delay in milliseconds.
+   * The extra 500ms keeps us off the exact boundary of the rate-limit window.
+   */
+  function parseRetryAfterMs(payload, fallbackMs = DEFAULT_RETRY_AFTER_MS) {
+    const seconds = Number(
+      payload?.body?.retry_after ??
+        payload?.retry_after ??
+        payload?.response?.body?.retry_after,
+    );
+
+    return Number.isFinite(seconds) && seconds > 0
+      ? Math.ceil(seconds * 1000) + 500
+      : fallbackMs;
+  }
+
+  function httpStatusOf(error) {
+    return error?.status ?? error?.response?.status;
+  }
+
+  // ============================================================
+  // discord webpack access
+  // ============================================================
+
+  function getWebpackRequire() {
+    const webpackRequire = window.webpackChunkdiscord_app.push([
+      [Math.random().toString(36)],
+      {},
+      (require) => require,
+    ]);
+
+    window.webpackChunkdiscord_app.pop();
+
+    return webpackRequire;
+  }
+
+  function findExport(webpackRequire, name, matcher) {
+    for (const module of Object.values(webpackRequire.c)) {
+      const exports = module?.exports;
+      if (!exports) continue;
+
+      try {
+        const found = matcher(exports);
+        if (found) return found;
+      } catch {
+        // A throwing module is simply not the one we are looking for.
+      }
+    }
+
+    throw new Error(`Could not find ${name}`);
+  }
+
+  /** Resolve every internal module the runner needs. Called once per cycle. */
+  function loadDiscord() {
+    const webpackRequire = getWebpackRequire();
+    const discord = {};
+
+    for (const [name, matcher] of Object.entries(MODULE_MATCHERS)) {
+      discord[name] = findExport(webpackRequire, name, matcher);
+    }
+
+    return discord;
+  }
+
+  // ============================================================
+  // quest fetching
+  // ============================================================
+
+  let questCache = null;
+  let questCacheExpiresAt = 0;
+  let questFetchInFlight = null;
+
+  async function fetchQuests(discord, { forceRefresh = false } = {}) {
+    if (!forceRefresh && questCache && Date.now() < questCacheExpiresAt) {
+      return questCache;
+    }
+
+    if (questFetchInFlight) return questFetchInFlight;
+
+    questFetchInFlight = (async () => {
+      while (true) {
+        try {
+          const response = await discord.api.get({
+            url: "/quests/@me",
+            rejectWithError: false,
+          });
+
+          if (response?.status === 429) {
+            const retryMs = parseRetryAfterMs(response, 5_500);
+            warn(`Rate limited. Retrying in ${retryMs}ms.`);
+            await sleep(retryMs);
+            continue;
+          }
+
+          if (response?.status >= 400) {
+            throw new Error(`Quest request failed: HTTP ${response.status}`);
+          }
+
+          return response?.body?.quests ?? [];
+        } catch (error) {
+          if (httpStatusOf(error) === 429) {
+            const retryMs = parseRetryAfterMs(error, 5_500);
+            warn(`Rate limited. Retrying in ${retryMs}ms.`);
+            await sleep(retryMs);
+            continue;
+          }
+
+          throw error;
+        }
+      }
+    })();
+
+    try {
+      const quests = await questFetchInFlight;
+      questCache = quests;
+      questCacheExpiresAt = Date.now() + QUEST_CACHE_TTL_MS;
+      return quests;
+    } finally {
+      questFetchInFlight = null;
+    }
+  }
+
+  async function getQuestById(discord, questId) {
+    const quests = await fetchQuests(discord);
+    return quests.find((quest) => quest.id === questId) ?? null;
+  }
+
+  async function getAcceptedQuest(discord, skippedQuestIds) {
+    const quests = await fetchQuests(discord);
+
+    return (
+      quests.find(
+        (quest) =>
+          !skippedQuestIds.has(quest.id) && isAcceptedActiveQuest(quest),
+      ) ?? null
+    );
+  }
+
+  // ============================================================
+  // quest predicates and accessors
+  // ============================================================
+
+  /** Unaccepted, not completed, and not expired. */
+  function isAvailableQuest(quest) {
+    if (!quest?.id) return false;
+    if (quest?.user_status?.enrolled_at != null) return false;
+    if (quest?.user_status?.completed_at != null) return false;
+
+    const expiry = Date.parse(quest?.config?.expires_at ?? "");
+
+    return !Number.isFinite(expiry) || expiry > Date.now();
+  }
+
+  /** Enrolled, not completed, and still inside its expiry window. */
+  function isAcceptedActiveQuest(quest) {
+    const enrolled = quest?.user_status?.enrolled_at != null;
+    const unfinished = quest?.user_status?.completed_at == null;
+    const expiry = Date.parse(quest?.config?.expires_at ?? "");
+
+    return enrolled && unfinished && Number.isFinite(expiry) && expiry > Date.now();
+  }
+
+  function questDisplayName(quest) {
+    return (
+      quest?.config?.messages?.quest_name ??
+      quest?.config?.application?.name ??
+      quest?.id ??
+      "unknown quest"
+    );
+  }
+
+  /**
+   * Why an accepted quest is no longer worth polling, or null if it is alive.
+   * Kept byte-compatible with the original payload: a quest without a parseable
+   * expiry reads as "expired" here.
+   */
+  function getQuestEndReason(quest) {
+    if (!quest) return "removed";
+    if (quest?.user_status?.completed_at != null) return "completed";
+    if (quest?.user_status?.enrolled_at == null) return "not-enrolled";
+
+    const expiry = Date.parse(quest?.config?.expires_at ?? "");
+
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) return "expired";
+
+    return null;
+  }
+
+  function getQuestTaskConfig(quest) {
+    const configs = [quest?.config?.task_config_v2, quest?.config?.task_config];
+
+    return (
+      configs.find(
+        (config) => config?.tasks && Object.keys(config.tasks).length > 0,
+      ) ??
+      configs.find(Boolean) ??
+      null
+    );
+  }
+
+  function getTaskDetails(quest) {
+    const taskConfig = getQuestTaskConfig(quest);
+
+    const taskName = SUPPORTED_TASK_NAMES.find(
+      (name) => taskConfig?.tasks?.[name] != null,
+    );
+
+    if (!taskName) return null;
+
+    return {
+      taskName,
+      task: taskConfig.tasks[taskName],
+      secondsNeeded: Number(taskConfig.tasks[taskName]?.target ?? 0),
+      secondsDone: Number(readQuestProgress(quest, taskName) ?? 0),
+    };
+  }
+
+  /** Progress is a bare number, a `{ value }` entry, or a legacy field. */
+  function readQuestProgress(quest, taskName) {
+    const entry = quest?.user_status?.progress?.[taskName];
+
+    if (typeof entry === "number") return entry;
+    if (typeof entry?.value === "number") return entry.value;
+    if (typeof quest?.user_status?.stream_progress_seconds === "number") {
+      return quest.user_status.stream_progress_seconds;
+    }
+
+    return 0;
+  }
+
+  /** Progress as delivered by a QUESTS_SEND_HEARTBEAT_SUCCESS event. */
+  function readHeartbeatProgress(quest, data, taskName) {
+    if (quest?.config?.config_version === 1) {
+      return Number(data?.userStatus?.streamProgressSeconds ?? 0);
+    }
+
+    const value = Number(data?.userStatus?.progress?.[taskName]?.value ?? 0);
+
+    return taskName === "STREAM_ON_DESKTOP" ? Math.floor(value) : value;
+  }
+
+  function readTrafficMetadata(quest, QuestsStore) {
+    try {
+      return (
+        QuestsStore?.getQuest?.(quest.id)?.trafficMetadataSealed ??
+        quest?.trafficMetadataSealed ??
+        quest?.traffic_metadata_sealed ??
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Poll until the quest ends, the caller's completion predicate flips, or a
+   * stop is requested. Returns a reason string, or "completed" on success.
+   */
+  async function waitForQuestEnd(ctx, isComplete) {
+    while (true) {
+      if (state.stopRunner) return "stopped";
+      if (isComplete?.()) return "completed";
+
+      await sleep(QUEST_POLL_INTERVAL_MS);
+
+      if (state.stopRunner) return "stopped";
+      if (isComplete?.()) return "completed";
+
+      const reason = getQuestEndReason(
+        await getQuestById(ctx.discord, ctx.quest.id),
+      );
+
+      if (reason) return reason;
+    }
+  }
+
+  // ============================================================
+  // strategy: WATCH_VIDEO / WATCH_VIDEO_ON_MOBILE
+  // ============================================================
+
+  async function runVideoQuest(ctx) {
+    const { discord, quest, details } = ctx;
+    const name = questDisplayName(quest);
+    const needed = details.secondsNeeded;
+
+    const enrolledAt = Date.parse(quest?.user_status?.enrolled_at ?? "");
+    const startedAt = Number.isFinite(enrolledAt) ? enrolledAt : Date.now();
+
+    let secondsDone = details.secondsDone;
+    let completed = false;
+    let stalledTicks = 0;
+
+    const postVideoProgress = (timestamp) =>
+      discord.api.post({
+        url: `/quests/${quest.id}/video-progress`,
+        body: { timestamp },
+      });
+
+    while (true) {
+      if (state.stopRunner) {
+        log(`Stopped while processing ${name}.`);
+        return "stopped";
+      }
+
+      const nextTimestamp = secondsDone + VIDEO_STEP_SECONDS;
+
+      // Discord only accepts progress up to (wall clock since enrollment +
+      // a small look-ahead), so we pace updates against that ceiling.
+      const maxAllowed =
+        Math.floor((Date.now() - startedAt) / 1000) + VIDEO_MAX_FUTURE_SECONDS;
+
+      let posted = false;
+
+      if (maxAllowed - secondsDone >= VIDEO_STEP_SECONDS) {
+        const response = await postVideoProgress(
+          Math.min(needed, nextTimestamp + Math.random()),
+        );
+
+        completed = response?.body?.completed_at != null;
+        secondsDone = Math.min(needed, nextTimestamp);
+        posted = true;
+        stalledTicks = 0;
+      }
+
+      if (completed || nextTimestamp >= needed) break;
+
+      if (!posted && ++stalledTicks > VIDEO_STALL_LIMIT) {
+        warn(
+          `${name}: no progress accepted for ${VIDEO_STALL_LIMIT}s, giving up on this quest.`,
+        );
+        return "stalled";
+      }
+
+      await sleep(VIDEO_TICK_MS);
+    }
+
+    if (!completed) {
+      await postVideoProgress(needed);
+    }
+
+    return "completed";
+  }
+
+  // ============================================================
+  // strategy: PLAY_ON_DESKTOP
+  // ============================================================
+
+  async function runDesktopGameQuest(ctx) {
+    const { discord, quest, details, pid } = ctx;
+    const { api, RunningGameStore, FluxDispatcher } = discord;
+    const name = questDisplayName(quest);
+
+    if (!isApp) {
+      warn(
+        "This no longer works in browser for non-video quests.",
+        `Use Discord desktop for ${name}.`,
+      );
+      return "skipped";
+    }
+
+    const applicationId = quest?.config?.application?.id;
+    const applicationName = quest?.config?.application?.name ?? "Unknown application";
+
+    const appResponse = await api.get({
+      url: `/applications/public?application_ids=${applicationId}`,
+    });
+
+    const appData = appResponse?.body?.[0] ?? {};
+    const exeEntry =
+      appData.executables?.find((candidate) => candidate.os === "win32") ??
+      appData.executables?.[0] ??
+      {};
+
+    const exeName =
+      String(exeEntry.name ?? appData.name ?? "").replace(">", "") ||
+      appData.name ||
+      "unknown.exe";
+
+    const fakeGame = {
+      cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+      exeName,
+      exePath: `C:/Program Files/${String(appData.name ?? "").toLowerCase()}/${exeName}`,
+      hidden: false,
+      isLauncher: false,
+      id: applicationId,
+      name: appData.name,
+      pid,
+      pidPath: [pid],
+      processName: exeName,
+      start: Date.now(),
     };
 
-    while (!stopProgram) {
-        try {
-
-
-	// ============================================================
-	// hax by 0x440-1me ;d
-	// Discord Quest Runner
-	// ============================================================
-
-	 // Accept one available quest before starting the original runner.
-	 await (async () => {
-	     const TAG = "[AUTO-QUEST-ACCEPT]";
-	     const log = (...args) => console.log(TAG, ...args);
-
-	     const wpRequire = window.webpackChunkdiscord_app.push([
-	         [Math.random().toString(36)],
-	         {},
-	         require => require
-	     ]);
-
-	     window.webpackChunkdiscord_app.pop();
-
-	     function findExport(matcher) {
-	         for (const module of Object.values(wpRequire.c)) {
-	             const exports = module?.exports;
-	             if (!exports)
-	                 continue;
-
-	             try {
-	                 const result = matcher(exports);
-	                 if (result)
-	                     return result;
-	             } catch {}
-	         }
-
-	         return null;
-	     }
-
-	     const api = findExport(exports =>
-	         exports.Bo?.get &&
-	         exports.Bo?.post &&
-	         exports.Bo
-	     );
-
-	     const QuestsStore = findExport(exports =>
-	         exports.A?.getQuest &&
-	         exports.A
-	     );
-
-	     if (!api)
-	         throw new Error("Could not find Discord API module.");
-
-	     function isAvailable(quest) {
-	         if (!quest?.id)
-	             return false;
-
-	         if (quest?.user_status?.enrolled_at != null)
-	             return false;
-
-	         if (quest?.user_status?.completed_at != null)
-	             return false;
-
-	         const expiry = Date.parse(
-	             quest?.config?.expires_at ?? ""
-	         );
-
-	         return !Number.isFinite(expiry) || expiry > Date.now();
-	     }
-
-	     const response = await api.get({
-	         url: "/quests/@me",
-	         rejectWithError: false
-	     });
-
-	     if (response?.status === 429) {
-	         const retryAfter = Number(response?.body?.retry_after);
-	         window.__questRunnerRetryAfterMs =
-	             Number.isFinite(retryAfter) && retryAfter > 0
-	                 ? retryAfter * 1000
-	                 : 60000;
-	         log("Quest fetch rate limited; next cycle will honor Retry-After.");
-	         return;
-	     }
-
-	     if (response?.status >= 400)
-	         throw new Error("Quest fetch failed: HTTP " + response.status);
-
-	     const quests = response?.body?.quests ?? [];
-	     const quest = quests.find(isAvailable);
-
-	     if (!quest) {
-	         noUnacceptedAvailable = true;
-	         log("No unaccepted available quests found.");
-	         return;
-	     }
-
-	     const name =
-	         quest?.config?.messages?.quest_name ??
-	         quest?.config?.application?.name ??
-	         quest.id;
-
-	     let trafficMetadata = null;
-
-	     try {
-	         trafficMetadata =
-	             QuestsStore
-	                 ?.getQuest?.(quest.id)
-	                 ?.trafficMetadataSealed ??
-	             quest?.trafficMetadataSealed ??
-	             quest?.traffic_metadata_sealed ??
-	             null;
-	     } catch {}
-
-	     log("Accepting: " + name);
-
-	     const enrollResponse = await api.post({
-	         url: "/quests/" + quest.id + "/enroll",
-	         body: {
-	             location: 11,
-	             is_targeted: false,
-	             metadata_sealed: null,
-	             traffic_metadata_sealed: trafficMetadata
-	         },
-	         rejectWithError: false
-	     });
-
-	     if (enrollResponse?.status === 429) {
-	         const retryAfter = Number(enrollResponse?.body?.retry_after);
-	         window.__questRunnerRetryAfterMs =
-	             Number.isFinite(retryAfter) && retryAfter > 0
-	                 ? retryAfter * 1000
-	                 : 60000;
-	         log("Enrollment rate limited; next cycle will honor Retry-After.");
-	         return;
-	     }
-
-	     if (enrollResponse?.status >= 200 && enrollResponse?.status < 300) {
-	         log("✓ Accepted: " + name);
-	     } else {
-	         console.warn(
-	             TAG,
-	             "Failed to accept " + name,
-	             enrollResponse?.status,
-	             enrollResponse?.body
-	         );
-	     }
-	 })();
-	if (stopProgram) break;
-
-	delete window.$;
-
-	const TAG = "[0x440]";
-
-	const log = (...args) =>
-		console.log(TAG, ...args);
-
-	const warn = (...args) =>
-		console.warn(TAG, ...args);
-
-	const errorLog = (...args) =>
-		console.error(TAG, ...args);
-
-
-	// ============================================================
-	// get discord webpack require
-	// ============================================================
-
-	let wpRequire = window.webpackChunkdiscord_app.push([
-		[Math.random().toString(36)],
-		{},
-		require => require
-	]);
-
-	window.webpackChunkdiscord_app.pop();
-
-
-	// ============================================================
-	// find webpack export
-	// ============================================================
-
-	const findExport = (name, matcher) => {
-		for (const module of Object.values(wpRequire.c)) {
-
-			const exports =
-				module?.exports;
-
-			if (!exports)
-				continue;
-
-			const found =
-				matcher(exports);
-
-			if (found)
-				return found;
-		}
-
-		throw new Error(
-			`Could not find ${name}`
-		);
-	};
-
-
-	// ============================================================
-	// load modules
-	// ============================================================
-
-	let ApplicationStreamingStore = findExport(
-		"ApplicationStreamingStore",
-		exports =>
-			exports.A?.getStreamerActiveStreamMetadata &&
-			exports.A
-	);
-
-	let RunningGameStore = findExport(
-		"RunningGameStore",
-		exports =>
-			exports.Ay?.getRunningGames &&
-			exports.Ay
-	);
-
-	let QuestsStore = findExport(
-		"QuestsStore",
-		exports =>
-			exports.A?.getQuest &&
-			exports.A
-	);
-
-	let ChannelStore = findExport(
-		"ChannelStore",
-		exports =>
-			exports.A?.getAllThreadsForParent &&
-			exports.A
-	);
-
-	let GuildChannelStore = findExport(
-		"GuildChannelStore",
-		exports =>
-			exports.Ay?.getSFWDefaultChannel &&
-			exports.Ay
-	);
-
-	let FluxDispatcher = findExport(
-		"FluxDispatcher",
-		exports =>
-			exports.h?.flushWaitQueue &&
-			exports.h
-	);
-
-	let api = findExport(
-		"api",
-		exports =>
-			exports.Bo?.get &&
-			exports.Bo?.post &&
-			exports.Bo
-	);
-
-
-	// ============================================================
-	// helpers
-	// ============================================================
-
-	const sleep = milliseconds =>
-		new Promise(resolve =>
-			setTimeout(
-				resolve,
-				milliseconds
-			)
-		);
-
-	const isApp =
-		typeof DiscordNative !== "undefined";
-
-	let stopRequested = false;
-
-	let questCache = null;
-
-	let questCacheExpiresAt = 0;
-
-	let questFetchInFlight = null;
-
-	const QUEST_CACHE_TTL = 5000;
-
-
-	window.stopQuestRunner = () => {
-
-		stopRequested = true;
-
-		warn(
-			"Stop requested. Runner will stop after the current loop."
-		);
-	};
-
-
-	// ============================================================
-	// quest config helper
-	// ============================================================
-
-	function getQuestTaskConfig(quest) {
-
-		const configs = [
-			quest?.config?.task_config_v2,
-			quest?.config?.task_config
-		];
-
-		return (
-			configs.find(config =>
-				config?.tasks &&
-				Object.keys(
-					config.tasks
-				).length > 0
-			) ??
-
-			configs.find(Boolean) ??
-
-			null
-		);
-	}
-
-
-	// ============================================================
-	// get quests
-	// ============================================================
-
-	async function fetchRawQuests(
-		forceRefresh = false
-	) {
-
-		if (
-			!forceRefresh &&
-			Date.now() < questCacheExpiresAt &&
-			questCache
-		) {
-			return questCache;
-		}
-
-		if (questFetchInFlight) {
-			return questFetchInFlight;
-		}
-
-		questFetchInFlight = (async () => {
-
-			while (true) {
-
-				try {
-
-					const response =
-						await api.get({
-							url: "/quests/@me",
-							rejectWithError: false
-						});
-
-
-					if (response?.status === 429) {
-
-						const retrySeconds =
-							Number(
-								response?.body
-									?.retry_after ?? 5
-							);
-
-						const retryMs =
-							Math.ceil(
-								retrySeconds * 1000
-							) + 500;
-
-						warn(
-							`Rate limited. Retrying in ${retryMs}ms.`
-						);
-
-						await sleep(
-							retryMs
-						);
-
-						continue;
-					}
-
-
-					if (
-						response?.status >= 400
-					) {
-						throw new Error(
-							`Quest request failed: HTTP ${response.status}`
-						);
-					}
-
-
-					return (
-						response?.body
-							?.quests ?? []
-					);
-
-				} catch (error) {
-
-					const status =
-						error?.status ??
-						error?.response?.status;
-
-
-					if (status === 429) {
-
-						const retrySeconds =
-							Number(
-								error?.body
-									?.retry_after ??
-								error?.response
-									?.body
-									?.retry_after ??
-								5
-							);
-
-						const retryMs =
-							Math.ceil(
-								retrySeconds * 1000
-							) + 500;
-
-
-						warn(
-							`Rate limited. Retrying in ${retryMs}ms.`
-						);
-
-						await sleep(
-							retryMs
-						);
-
-						continue;
-					}
-
-					throw error;
-				}
-			}
-
-		})();
-
-
-		try {
-
-			const quests =
-				await questFetchInFlight;
-
-			questCache =
-				quests;
-
-			questCacheExpiresAt =
-				Date.now() +
-				QUEST_CACHE_TTL;
-
-			return quests;
-
-		} finally {
-
-			questFetchInFlight =
-				null;
-		}
-	}
-
-
-	// ============================================================
-	// quest filtering
-	// ============================================================
-
-	function isAcceptedActiveQuest(
-		quest
-	) {
-
-		const enrolled =
-			quest?.user_status
-				?.enrolled_at != null;
-
-		const unfinished =
-			quest?.user_status
-				?.completed_at == null;
-
-		const expiry =
-			Date.parse(
-				quest?.config
-					?.expires_at ?? ""
-			);
-
-		const active =
-			Number.isFinite(expiry) &&
-			expiry > Date.now();
-
-
-		return (
-			enrolled &&
-			unfinished &&
-			active
-		);
-	}
-
-
-	async function getAcceptedQuest(
-		skippedQuestIds = new Set()
-	) {
-
-		const quests =
-			await fetchRawQuests();
-
-		return (
-			quests.find(quest =>
-				!skippedQuestIds.has(
-					quest.id
-				) &&
-				isAcceptedActiveQuest(
-					quest
-				)
-			) ?? null
-		);
-	}
-
-
-	async function getQuestById(
-		questId
-	) {
-
-		const quests =
-			await fetchRawQuests();
-
-		return (
-			quests.find(
-				quest =>
-					quest.id === questId
-			) ?? null
-		);
-	}
-
-
-	// ============================================================
-	// task details
-	// ============================================================
-
-	function getTaskDetails(
-		quest
-	) {
-
-		const taskConfig =
-			getQuestTaskConfig(
-				quest
-			);
-
-
-		const supportedTaskNames = [
-
-			"WATCH_VIDEO",
-
-			"WATCH_VIDEO_ON_MOBILE",
-
-			"PLAY_ON_DESKTOP",
-
-			"STREAM_ON_DESKTOP",
-
-			"PLAY_ACTIVITY"
-		];
-
-
-		const taskName =
-			supportedTaskNames.find(
-				name =>
-					taskConfig
-						?.tasks
-						?.[name] != null
-			);
-
-
-		if (!taskName) {
-			return null;
-		}
-
-
-		const task =
-			taskConfig.tasks[
-				taskName
-			];
-
-
-		const progressEntry =
-			quest
-				?.user_status
-				?.progress
-				?.[taskName];
-
-
-		let progressValue = 0;
-
-
-		if (
-			typeof progressEntry ===
-			"number"
-		) {
-
-			progressValue =
-				progressEntry;
-
-		} else if (
-			typeof progressEntry
-				?.value === "number"
-		) {
-
-			progressValue =
-				progressEntry.value;
-
-		} else if (
-			typeof quest
-				?.user_status
-				?.stream_progress_seconds ===
-			"number"
-		) {
-
-			progressValue =
-				quest
-					.user_status
-					.stream_progress_seconds;
-		}
-
-
-		return {
-
-			taskName,
-
-			task,
-
-			secondsNeeded:
-				Number(
-					task?.target ?? 0
-				),
-
-			secondsDone:
-				Number(
-					progressValue ?? 0
-				)
-		};
-	}
-
-
-	// ============================================================
-	// end check
-	// ============================================================
-
-	function getQuestEndReason(
-		quest
-	) {
-
-		if (!quest) {
-			return "removed";
-		}
-
-
-		if (
-			quest
-				.user_status
-				?.completed_at != null
-		) {
-			return "completed";
-		}
-
-
-		if (
-			quest
-				.user_status
-				?.enrolled_at == null
-		) {
-			return "not-enrolled";
-		}
-
-
-		const expiry =
-			Date.parse(
-				quest
-					.config
-					?.expires_at ?? ""
-			);
-
-
-		if (
-			!Number.isFinite(
-				expiry
-			) ||
-			expiry <= Date.now()
-		) {
-			return "expired";
-		}
-
-
-		return null;
-	}
-
-
-	// ============================================================
-	// process quest
-	// ============================================================
-
-	async function processQuest(
-		quest,
-		initialDetails,
-		pid
-	) {
-
-		const questId =
-			quest.id;
-
-
-		const questName =
-			quest
-				.config
-				?.messages
-				?.quest_name ??
-			questId;
-
-
-		const applicationId =
-			quest
-				.config
-				?.application
-				?.id;
-
-
-		const applicationName =
-			quest
-				.config
-				?.application
-				?.name ??
-			"Unknown application";
-
-
-		const {
-			taskName,
-			secondsNeeded,
-			secondsDone:
-				initialSecondsDone
-		} = initialDetails;
-
-
-		let secondsDone =
-			initialSecondsDone;
-
-
-		while (true) {
-
-			if (stopRequested) {
-
-				log(
-					`Stopped while processing ${questName}.`
-				);
-
-				break;
-			}
-
-
-			const currentQuest =
-				await getQuestById(
-					questId
-				);
-
-
-			const endReason =
-				getQuestEndReason(
-					currentQuest
-				);
-
-
-			if (endReason) {
-
-				log(
-					`${questName} ended: ${endReason}.`
-				);
-
-				break;
-			}
-
-
-			const currentDetails =
-				getTaskDetails(
-					currentQuest
-				);
-
-
-			if (!currentDetails) {
-
-				warn(
-					`${questName} no longer has a supported task.`
-				);
-
-				break;
-			}
-
-
-			log(
-				`${questName}: ` +
-				`${currentDetails.secondsDone}/` +
-				`${currentDetails.secondsNeeded} ` +
-				`(${currentDetails.taskName})`
-			);
-
-
-			// ====================================================
-			// WATCH VIDEO
-			// ====================================================
-
-			if (
-				taskName ===
-					"WATCH_VIDEO" ||
-				taskName ===
-					"WATCH_VIDEO_ON_MOBILE"
-			) {
-
-				const maxFuture = 10;
-
-				const speed = 7;
-
-				const interval = 1;
-
-
-				const enrolledAt =
-					new Date(
-						quest
-							.user_status
-							.enrolled_at
-					).getTime();
-
-
-				let completed =
-					false;
-
-
-				while (true) {
-
-					const maxAllowed =
-						Math.floor(
-							(
-								Date.now() -
-								enrolledAt
-							) / 1000
-						) +
-						maxFuture;
-
-
-					const diff =
-						maxAllowed -
-						secondsDone;
-
-
-					const timestamp =
-						secondsDone +
-						speed;
-
-
-					if (
-						diff >= speed
-					) {
-
-						const res =
-							await api.post({
-
-								url:
-									`/quests/${quest.id}/video-progress`,
-
-								body: {
-
-									timestamp:
-										Math.min(
-											secondsNeeded,
-											timestamp +
-												Math.random()
-										)
-								}
-							});
-
-
-						completed =
-							res
-								.body
-								.completed_at !=
-							null;
-
-
-						secondsDone =
-							Math.min(
-								secondsNeeded,
-								timestamp
-							);
-					}
-
-
-					if (
-						timestamp >=
-						secondsNeeded
-					) {
-						break;
-					}
-
-
-					await sleep(
-						interval * 1000
-					);
-				}
-
-
-				if (!completed) {
-
-					await api.post({
-
-						url:
-							`/quests/${quest.id}/video-progress`,
-
-						body: {
-							timestamp:
-								secondsNeeded
-						}
-					});
-				}
-
-
-				log(
-					`Quest completed: ${questName}`
-				);
-
-				return;
-			}
-
-
-			// ====================================================
-			// PLAY ON DESKTOP
-			// ====================================================
-
-			else if (
-				taskName ===
-				"PLAY_ON_DESKTOP"
-			) {
-
-				if (!isApp) {
-
-					warn(
-						"This no longer works in browser for non-video quests.",
-						`Use Discord desktop for ${questName}.`
-					);
-
-					return;
-				}
-
-
-				try {
-
-					const res =
-						await api.get({
-
-							url:
-								`/applications/public?application_ids=${applicationId}`
-						});
-
-
-					const appData =
-						res.body[0] ??
-						{};
-
-
-					const exeEntry =
-						appData
-							.executables
-							?.find(
-								x =>
-									x.os ===
-									"win32"
-							) ??
-
-						appData
-							.executables
-							?.[0] ??
-
-						{};
-
-
-					const exeName =
-						String(
-							exeEntry.name ??
-							appData.name ??
-							""
-						)
-							.replace(
-								">",
-								""
-							) ||
-
-						appData.name ||
-
-						"unknown.exe";
-
-
-					const fakeGame = {
-
-						cmdLine:
-							`C:\\Program Files\\${appData.name}\\${exeName}`,
-
-						exeName,
-
-						exePath:
-							`C:/Program Files/${String(
-								appData.name ?? ""
-							).toLowerCase()}/${exeName}`,
-
-						hidden: false,
-
-						isLauncher: false,
-
-						id:
-							applicationId,
-
-						name:
-							appData.name,
-
-						pid,
-
-						pidPath:
-							[pid],
-
-						processName:
-							exeName,
-
-						start:
-							Date.now()
-					};
-
-
-					const realGames =
-						RunningGameStore
-							.getRunningGames();
-
-
-					const fakeGames =
-						[fakeGame];
-
-
-					const realGetRunningGames =
-						RunningGameStore
-							.getRunningGames;
-
-
-					const realGetGameForPID =
-						RunningGameStore
-							.getGameForPID;
-
-
-					RunningGameStore
-						.getRunningGames =
-						() =>
-							fakeGames;
-
-
-					RunningGameStore
-						.getGameForPID =
-						searchPid =>
-							fakeGames.find(
-								x =>
-									x.pid ===
-									searchPid
-							);
-
-
-					FluxDispatcher.dispatch({
-
-						type:
-							"RUNNING_GAMES_CHANGE",
-
-						removed:
-							realGames,
-
-						added:
-							[fakeGame],
-
-						games:
-							fakeGames
-					});
-
-
-					const progressHandler =
-						data => {
-
-							const progress =
-								quest
-									.config
-									.config_version ===
-								1
-
-									? Number(
-										data
-											?.userStatus
-											?.streamProgressSeconds ??
-										0
-									)
-
-									: Number(
-										data
-											?.userStatus
-											?.progress
-											?.PLAY_ON_DESKTOP
-											?.value ??
-										0
-									);
-
-
-							log(
-								`Quest progress: ${progress}/${secondsNeeded}`
-							);
-
-
-							if (
-								progress >=
-								secondsNeeded
-							) {
-
-								log(
-									`Quest completed: ${questName}`
-								);
-
-
-								RunningGameStore
-									.getRunningGames =
-									realGetRunningGames;
-
-
-								RunningGameStore
-									.getGameForPID =
-									realGetGameForPID;
-
-
-								FluxDispatcher.dispatch({
-
-									type:
-										"RUNNING_GAMES_CHANGE",
-
-									removed:
-										[fakeGame],
-
-									added:
-										[],
-
-									games:
-										[]
-								});
-
-
-								FluxDispatcher
-									.unsubscribe?.(
-										"QUESTS_SEND_HEARTBEAT_SUCCESS",
-										progressHandler
-									);
-							}
-						};
-
-
-					FluxDispatcher.subscribe(
-						"QUESTS_SEND_HEARTBEAT_SUCCESS",
-						progressHandler
-					);
-
-
-					log(
-						`Spoofed game to ${applicationName}.`,
-						`Wait ${Math.ceil(
-							(
-								secondsNeeded -
-								secondsDone
-							) / 60
-						)} more minutes.`
-					);
-
-
-					return;
-
-				} catch (error) {
-
-					errorLog(
-						"Failed to process PLAY_ON_DESKTOP:",
-						error
-					);
-
-					return;
-				}
-			}
-
-
-			// ====================================================
-			// STREAM ON DESKTOP
-			// ====================================================
-
-			else if (
-				taskName ===
-				"STREAM_ON_DESKTOP"
-			) {
-
-				if (!isApp) {
-
-					warn(
-						`Use Discord desktop for ${questName}.`
-					);
-
-					return;
-				}
-
-
-				const realFunc =
-					ApplicationStreamingStore
-						.getStreamerActiveStreamMetadata;
-
-
-				ApplicationStreamingStore
-					.getStreamerActiveStreamMetadata =
-					() => ({
-
-						id:
-							applicationId,
-
-						pid,
-
-						sourceName:
-							null
-					});
-
-
-				const progressHandler =
-					data => {
-
-						const progress =
-							quest
-								.config
-								.config_version ===
-							1
-
-								? Number(
-									data
-										?.userStatus
-										?.streamProgressSeconds ??
-									0
-								)
-
-								: Math.floor(
-									Number(
-										data
-											?.userStatus
-											?.progress
-											?.STREAM_ON_DESKTOP
-											?.value ??
-										0
-									)
-								);
-
-
-						log(
-							`Quest progress: ${progress}/${secondsNeeded}`
-						);
-
-
-						if (
-							progress >=
-							secondsNeeded
-						) {
-
-							log(
-								`Quest completed: ${questName}`
-							);
-
-
-							ApplicationStreamingStore
-								.getStreamerActiveStreamMetadata =
-								realFunc;
-
-
-							FluxDispatcher.unsubscribe(
-								"QUESTS_SEND_HEARTBEAT_SUCCESS",
-								progressHandler
-							);
-						}
-					};
-
-
-				FluxDispatcher.subscribe(
-					"QUESTS_SEND_HEARTBEAT_SUCCESS",
-					progressHandler
-				);
-
-
-				log(
-					`Spoofed stream to ${applicationName}.`,
-					`Stream any window in VC for ${Math.ceil(
-						(
-							secondsNeeded -
-							secondsDone
-						) / 60
-					)} more minutes.`
-				);
-
-
-				log(
-					"At least one other person needs to be in the VC."
-				);
-
-
-				return;
-			}
-
-
-			// ====================================================
-			// PLAY ACTIVITY
-			// ====================================================
-
-			else if (
-				taskName ===
-					"PLAY_ACTIVITY"
-			) {
-
-				const channelId =
-					ChannelStore
-						.getSortedPrivateChannels()
-						?.[0]
-						?.id ??
-
-					Object
-						.values(
-							GuildChannelStore
-								.getAllGuilds()
-						)
-						.find(
-							x =>
-								x != null &&
-								x.VOCAL.length >
-								0
-						)
-						.VOCAL[0]
-						.channel
-						.id;
-
-
-				const streamKey =
-					`call:${channelId}:1`;
-
-
-				log(
-					"Completing quest:",
-					questName
-				);
-
-
-				while (true) {
-
-					const res =
-						await api.post({
-
-							url:
-								`/quests/${quest.id}/heartbeat`,
-
-							body: {
-
-								stream_key:
-									streamKey,
-
-								terminal:
-									false
-							}
-						});
-
-
-					const progress =
-						res
-							.body
-							.progress
-							.PLAY_ACTIVITY
-							.value;
-
-
-					log(
-						`Quest progress: ${progress}/${secondsNeeded}`
-					);
-
-
-					if (
-						progress >=
-						secondsNeeded
-					) {
-
-						await api.post({
-
-							url:
-								`/quests/${quest.id}/heartbeat`,
-
-							body: {
-
-								stream_key:
-									streamKey,
-
-								terminal:
-									true
-							}
-						});
-
-						break;
-					}
-
-
-					await sleep(
-						20 * 1000
-					);
-				}
-
-
-				log(
-					`Quest completed: ${questName}`
-				);
-
-				return;
-			}
-
-
-			else {
-
-				warn(
-					`Unsupported task: ${taskName}`
-				);
-
-				break;
-			}
-
-
-			await sleep(5000);
-		}
-	}
-
-
-	// ============================================================
-	// unsupported quest debug
-	// ============================================================
-
-	function debugUnsupportedQuest(
-		quest
-	) {
-
-		const taskConfig =
-			getQuestTaskConfig(
-				quest
-			);
-
-
-		const taskNames =
-			Object.keys(
-				taskConfig
-					?.tasks ?? {}
-			);
-
-
-		const knownUnsupportedTaskNames = [
-
-			"ACHIEVEMENT_IN_ACTIVITY",
-
-			"PLAY_ON_XBOX",
-
-			"PLAY_ON_PLAYSTATION"
-		];
-
-
-		const knownUnsupported =
-			taskNames.filter(
-				name =>
-					knownUnsupportedTaskNames
-						.includes(name)
-			);
-
-
-		if (
-			taskNames.includes(
-				"ACHIEVEMENT_IN_ACTIVITY"
-			)
-		) {
-
-			const achievementTask =
-				taskConfig
-					?.tasks
-					?.ACHIEVEMENT_IN_ACTIVITY;
-
-
-			log(
-				"ACHIEVEMENT_IN_ACTIVITY debug:",
-				{
-
-					questId:
-						quest.id,
-
-					questName:
-						quest
-							?.config
-							?.messages
-							?.quest_name,
-
-					task:
-						achievementTask,
-
-					progress:
-						quest
-							?.user_status
-							?.progress
-							?.ACHIEVEMENT_IN_ACTIVITY,
-
-					completedAt:
-						quest
-							?.user_status
-							?.completed_at,
-
-					enrolledAt:
-						quest
-							?.user_status
-							?.enrolled_at
-				}
-			);
-		}
-
-
-		if (
-			knownUnsupported.length
-		) {
-
-			warn(
-				"Skipping known unsupported quest:",
-				quest.id,
-				quest
-					?.config
-					?.messages
-					?.quest_name,
-				"tasks:",
-				knownUnsupported
-			);
-
-		} else {
-
-			warn(
-				"Skipping UNKNOWN quest type:",
-				quest.id,
-				quest
-					?.config
-					?.messages
-					?.quest_name,
-				"tasks:",
-				taskNames
-			);
-		}
-	}
-
-
-	// ============================================================
-	// run all accepted quests
-	// ============================================================
-
-	async function runAllAcceptedQuests() {
-
-		if (
-			window.__questRunnerActive
-		) {
-
-			warn(
-				"Quest runner is already running."
-			);
-
-			return;
-		}
-
-
-		window.__questRunnerActive =
-			true;
-
-		stopRequested =
-			false;
-
-
-		const skippedQuestIds =
-			new Set();
-
-
-		log(
-			"Quest runner started."
-		);
-
-
-		try {
-
-			while (
-				!stopRequested
-			) {
-
-				const quest =
-					await getAcceptedQuest(
-						skippedQuestIds
-					);
-
-
-				if (!quest) {
-
-					log(
-						"No supported accepted active quests remaining."
-					);
-
-					break;
-				}
-
-
-				const details =
-					getTaskDetails(
-						quest
-					);
-
-
-				if (!details) {
-
-					debugUnsupportedQuest(
-						quest
-					);
-
-
-					skippedQuestIds.add(
-						quest.id
-					);
-
-
-					await sleep(
-						1000
-					);
-
-
-					continue;
-				}
-
-
-				log(
-					"Starting quest:",
-					quest
-						?.config
-						?.messages
-						?.quest_name ??
-					quest.id,
-					`(${details.taskName})`
-				);
-
-
-				const pid =
-					Math.floor(
-						Math.random() *
-						30000
-					) +
-					1000;
-
-
-				await processQuest(
-					quest,
-					details,
-					pid
-				);
-
-
-				await sleep(
-					10000
-				);
-			}
-
-		} finally {
-
-			window.__questRunnerActive =
-				false;
-		}
-
-
-		if (
-			skippedQuestIds.size
-		) {
-
-			log(
-				`Quest runner finished. Skipped ${skippedQuestIds.size} unsupported quest(s).`
-			);
-
-		} else {
-
-			log(
-				"Quest runner finished."
-			);
-		}
-	}
-
-
-	// ============================================================
-	// 0x440 launch
-	// ============================================================
-
-	log(
-		"0x440 quest runner loaded ;d"
-	);
-
-
-	await runAllAcceptedQuests();
-        } catch (error) {
-            const status = error?.status ?? error?.response?.status;
-            if (status === 429) {
-                const retryAfter = Number(error?.body?.retry_after ?? error?.response?.body?.retry_after);
-                window.__questRunnerRetryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 60000;
-            }
-            console.error("[0x440] Quest runner cycle failed:", error);
+    const realGetRunningGames = RunningGameStore.getRunningGames;
+    const realGetGameForPID = RunningGameStore.getGameForPID;
+    const realGames = RunningGameStore.getRunningGames();
+
+    let progress = details.secondsDone;
+
+    const onHeartbeat = (data) => {
+      progress = readHeartbeatProgress(quest, data, "PLAY_ON_DESKTOP");
+      log(`Quest progress: ${progress}/${details.secondsNeeded}`);
+    };
+
+    const install = () => {
+      RunningGameStore.getRunningGames = () => [fakeGame];
+      RunningGameStore.getGameForPID = (searchPid) =>
+        searchPid === fakeGame.pid ? fakeGame : undefined;
+
+      FluxDispatcher.dispatch({
+        type: "RUNNING_GAMES_CHANGE",
+        removed: realGames,
+        added: [fakeGame],
+        games: [fakeGame],
+      });
+
+      FluxDispatcher.subscribe(HEARTBEAT_EVENT, onHeartbeat);
+    };
+
+    const uninstall = () => {
+      RunningGameStore.getRunningGames = realGetRunningGames;
+      RunningGameStore.getGameForPID = realGetGameForPID;
+
+      FluxDispatcher.dispatch({
+        type: "RUNNING_GAMES_CHANGE",
+        removed: [fakeGame],
+        added: [],
+        games: [],
+      });
+
+      FluxDispatcher.unsubscribe?.(HEARTBEAT_EVENT, onHeartbeat);
+    };
+
+    try {
+      install();
+
+      log(
+        `Spoofed game to ${applicationName}.`,
+        `Wait ${Math.ceil((details.secondsNeeded - details.secondsDone) / 60)} more minutes.`,
+      );
+
+      return await waitForQuestEnd(ctx, () => progress >= details.secondsNeeded);
+    } finally {
+      uninstall();
+    }
+  }
+
+  // ============================================================
+  // strategy: STREAM_ON_DESKTOP
+  // ============================================================
+
+  async function runDesktopStreamQuest(ctx) {
+    const { discord, quest, details, pid } = ctx;
+    const { ApplicationStreamingStore, FluxDispatcher } = discord;
+    const name = questDisplayName(quest);
+    const applicationName = quest?.config?.application?.name ?? "Unknown application";
+
+    if (!isApp) {
+      warn(`Use Discord desktop for ${name}.`);
+      return "skipped";
+    }
+
+    const realGetStreamerActiveStreamMetadata =
+      ApplicationStreamingStore.getStreamerActiveStreamMetadata;
+
+    let progress = details.secondsDone;
+
+    const onHeartbeat = (data) => {
+      progress = readHeartbeatProgress(quest, data, "STREAM_ON_DESKTOP");
+      log(`Quest progress: ${progress}/${details.secondsNeeded}`);
+    };
+
+    try {
+      ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({
+        id: quest?.config?.application?.id,
+        pid,
+        sourceName: null,
+      });
+
+      FluxDispatcher.subscribe(HEARTBEAT_EVENT, onHeartbeat);
+
+      log(
+        `Spoofed stream to ${applicationName}.`,
+        `Stream any window in VC for ${Math.ceil(
+          (details.secondsNeeded - details.secondsDone) / 60,
+        )} more minutes.`,
+      );
+      log("At least one other person needs to be in the VC.");
+
+      return await waitForQuestEnd(ctx, () => progress >= details.secondsNeeded);
+    } finally {
+      ApplicationStreamingStore.getStreamerActiveStreamMetadata =
+        realGetStreamerActiveStreamMetadata;
+
+      FluxDispatcher.unsubscribe?.(HEARTBEAT_EVENT, onHeartbeat);
+    }
+  }
+
+  // ============================================================
+  // strategy: PLAY_ACTIVITY
+  // ============================================================
+
+  /** First private channel, else the first voice channel of any guild. */
+  function findActivityChannelId(discord) {
+    const privateChannelId =
+      discord.ChannelStore.getSortedPrivateChannels?.()?.[0]?.id;
+
+    if (privateChannelId) return privateChannelId;
+
+    const guild = Object.values(
+      discord.GuildChannelStore.getAllGuilds?.() ?? {},
+    ).find((candidate) => candidate?.VOCAL?.length > 0);
+
+    return guild?.VOCAL?.[0]?.channel?.id ?? null;
+  }
+
+  async function runActivityQuest(ctx) {
+    const { discord, quest, details } = ctx;
+    const { api } = discord;
+    const name = questDisplayName(quest);
+
+    const channelId = findActivityChannelId(discord);
+
+    if (!channelId) {
+      warn(`No voice or private channel available for ${name}.`);
+      return "skipped";
+    }
+
+    const streamKey = `call:${channelId}:1`;
+
+    const sendHeartbeat = (terminal) =>
+      api.post({
+        url: `/quests/${quest.id}/heartbeat`,
+        body: { stream_key: streamKey, terminal },
+      });
+
+    log("Completing quest:", name);
+
+    while (true) {
+      if (state.stopRunner) {
+        log(`Stopped while processing ${name}.`);
+        return "stopped";
+      }
+
+      const response = await sendHeartbeat(false);
+      const progress = Number(
+        response?.body?.progress?.PLAY_ACTIVITY?.value ?? 0,
+      );
+
+      log(`Quest progress: ${progress}/${details.secondsNeeded}`);
+
+      if (progress >= details.secondsNeeded) {
+        await sendHeartbeat(true);
+        return "completed";
+      }
+
+      await sleep(ACTIVITY_HEARTBEAT_MS);
+    }
+  }
+
+  // ============================================================
+  // strategy dispatch
+  // ============================================================
+
+  const TASK_STRATEGIES = {
+    WATCH_VIDEO: runVideoQuest,
+    WATCH_VIDEO_ON_MOBILE: runVideoQuest,
+    PLAY_ON_DESKTOP: runDesktopGameQuest,
+    STREAM_ON_DESKTOP: runDesktopStreamQuest,
+    PLAY_ACTIVITY: runActivityQuest,
+  };
+
+  async function processQuest(ctx) {
+    const { quest, details } = ctx;
+    const name = questDisplayName(quest);
+    const strategy = TASK_STRATEGIES[details.taskName];
+
+    if (!strategy) {
+      warn(`Unsupported task: ${details.taskName}`);
+      return "skipped";
+    }
+
+    log(
+      `${name}: ${details.secondsDone}/${details.secondsNeeded} (${details.taskName})`,
+    );
+
+    let reason;
+
+    try {
+      reason = await strategy(ctx);
+    } catch (error) {
+      errorLog(`Failed to process ${details.taskName} for ${name}:`, error);
+      return "failed";
+    }
+
+    if (reason === "completed") {
+      log(`Quest completed: ${name}`);
+    } else if (reason && reason !== "stopped" && reason !== "skipped") {
+      log(`${name} ended: ${reason}.`);
+    }
+
+    return reason;
+  }
+
+  // ============================================================
+  // unsupported quest diagnostics
+  // ============================================================
+
+  function debugUnsupportedQuest(quest) {
+    const taskConfig = getQuestTaskConfig(quest);
+    const taskNames = Object.keys(taskConfig?.tasks ?? {});
+
+    if (taskNames.includes("ACHIEVEMENT_IN_ACTIVITY")) {
+      log("ACHIEVEMENT_IN_ACTIVITY debug:", {
+        questId: quest.id,
+        questName: quest?.config?.messages?.quest_name,
+        task: taskConfig?.tasks?.ACHIEVEMENT_IN_ACTIVITY,
+        progress: quest?.user_status?.progress?.ACHIEVEMENT_IN_ACTIVITY,
+        completedAt: quest?.user_status?.completed_at,
+        enrolledAt: quest?.user_status?.enrolled_at,
+      });
+    }
+
+    const knownUnsupported = taskNames.filter((taskName) =>
+      KNOWN_UNSUPPORTED_TASK_NAMES.includes(taskName),
+    );
+
+    if (knownUnsupported.length) {
+      warn(
+        "Skipping known unsupported quest:",
+        quest.id,
+        quest?.config?.messages?.quest_name,
+        "tasks:",
+        knownUnsupported,
+      );
+    } else {
+      warn(
+        "Skipping UNKNOWN quest type:",
+        quest.id,
+        quest?.config?.messages?.quest_name,
+        "tasks:",
+        taskNames,
+      );
+    }
+  }
+
+  // ============================================================
+  // enrollment
+  // ============================================================
+
+  async function acceptAvailableQuest(discord) {
+    const acceptLog = (...args) => console.log(ACCEPT_TAG, ...args);
+    const { api, QuestsStore } = discord;
+
+    const response = await api.get({
+      url: "/quests/@me",
+      rejectWithError: false,
+    });
+
+    if (response?.status === 429) {
+      state.retryAfterMs = parseRetryAfterMs(response);
+      acceptLog("Quest fetch rate limited; next cycle will honor Retry-After.");
+      return;
+    }
+
+    if (response?.status >= 400) {
+      throw new Error(`Quest fetch failed: HTTP ${response.status}`);
+    }
+
+    const quest = (response?.body?.quests ?? []).find(isAvailableQuest);
+
+    if (!quest) {
+      state.noUnacceptedAvailable = true;
+      acceptLog("No unaccepted available quests found.");
+      return;
+    }
+
+    const name = questDisplayName(quest);
+
+    acceptLog(`Accepting: ${name}`);
+
+    const enrollResponse = await api.post({
+      url: `/quests/${quest.id}/enroll`,
+      body: {
+        location: 11,
+        is_targeted: false,
+        metadata_sealed: null,
+        traffic_metadata_sealed: readTrafficMetadata(quest, QuestsStore),
+      },
+      rejectWithError: false,
+    });
+
+    if (enrollResponse?.status === 429) {
+      state.retryAfterMs = parseRetryAfterMs(enrollResponse);
+      acceptLog("Enrollment rate limited; next cycle will honor Retry-After.");
+      return;
+    }
+
+    if (enrollResponse?.status >= 200 && enrollResponse?.status < 300) {
+      acceptLog(`✓ Accepted: ${name}`);
+    } else {
+      console.warn(
+        ACCEPT_TAG,
+        `Failed to accept ${name}`,
+        enrollResponse?.status,
+        enrollResponse?.body,
+      );
+    }
+  }
+
+  // ============================================================
+  // runner
+  // ============================================================
+
+  async function runAllAcceptedQuests(discord) {
+    if (window.__questRunnerActive) {
+      warn("Quest runner is already running.");
+      return;
+    }
+
+    window.__questRunnerActive = true;
+    state.stopRunner = false;
+
+    const skippedQuestIds = new Set();
+
+    log("Quest runner started.");
+
+    try {
+      while (!state.stopRunner) {
+        const quest = await getAcceptedQuest(discord, skippedQuestIds);
+
+        if (!quest) {
+          log("No supported accepted active quests remaining.");
+          break;
         }
 
-        if (stopProgram || noUnacceptedAvailable)
-            break;
+        const details = getTaskDetails(quest);
 
-        const retryAfterMs = Number(window.__questRunnerRetryAfterMs);
-        const delayMs = Math.max(60000, Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0);
-        window.__questRunnerRetryAfterMs = 0;
-        console.log("[0x440] Cycle stopped; restarting in " + Math.ceil(delayMs / 1000) + " seconds. Call window.stopQuestProgram() to stop.");
-        await new Promise(resolve => {
-            const timer = setTimeout(resolve, delayMs);
-            stopLoopWake = () => { clearTimeout(timer); resolve(); };
-        });
-        stopLoopWake = null;
+        if (!details) {
+          debugUnsupportedQuest(quest);
+          skippedQuestIds.add(quest.id);
+          await sleep(UNSUPPORTED_SKIP_DELAY_MS);
+          continue;
+        }
+
+        log("Starting quest:", questDisplayName(quest), `(${details.taskName})`);
+
+        const pid = Math.floor(Math.random() * 30_000) + 1_000;
+
+        const outcome = await processQuest({ quest, details, pid, discord });
+
+        // A quest we cannot drive stays in the accepted list forever, so give
+        // up on it for this pass instead of re-picking it every 10 seconds.
+        if (outcome === "skipped" || outcome === "stalled") {
+          skippedQuestIds.add(quest.id);
+          await sleep(UNSUPPORTED_SKIP_DELAY_MS);
+          continue;
+        }
+
+        await sleep(BETWEEN_QUESTS_DELAY_MS);
+      }
+    } finally {
+      window.__questRunnerActive = false;
     }
-})().catch(error => {
 
-	console.error(
-		"[0x440]",
-		"Quest runner failed:",
-		error
-	);
+    log(
+      skippedQuestIds.size
+        ? `Quest runner finished. Skipped ${skippedQuestIds.size} unsupported quest(s).`
+        : "Quest runner finished.",
+    );
+  }
+
+  // ============================================================
+  // public handles
+  // ============================================================
+
+  window.stopQuestRunner = () => {
+    state.stopRunner = true;
+    warn("Stop requested. Runner will stop after the current loop.");
+  };
+
+  window.stopQuestProgram = () => {
+    state.stopProgram = true;
+    window.stopQuestRunner?.();
+    state.loopWake?.();
+    console.log(`${TAG} Program stop requested.`);
+  };
+
+  // ============================================================
+  // main: enroll -> run -> cool down -> repeat
+  // ============================================================
+
+  log("0x440 quest runner loaded ;d");
+
+  while (!state.stopProgram) {
+    try {
+      const discord = loadDiscord();
+
+      await acceptAvailableQuest(discord);
+
+      if (state.stopProgram) break;
+
+      await runAllAcceptedQuests(discord);
+    } catch (error) {
+      if (httpStatusOf(error) === 429) {
+        state.retryAfterMs = parseRetryAfterMs(error);
+      }
+
+      errorLog("Quest runner cycle failed:", error);
+    }
+
+    if (state.stopProgram || state.noUnacceptedAvailable) break;
+
+    const delayMs = Math.max(MIN_CYCLE_DELAY_MS, state.retryAfterMs || 0);
+    state.retryAfterMs = 0;
+
+    log(
+      `Cycle stopped; restarting in ${Math.ceil(delayMs / 1000)} seconds. ` +
+        "Call window.stopQuestProgram() to stop.",
+    );
+
+    await interruptibleDelay(delayMs);
+  }
+})().catch((error) => {
+  console.error("[0x440]", "Quest runner failed:", error);
 });
